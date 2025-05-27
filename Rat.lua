@@ -44,10 +44,13 @@ if (GetLocale() == "deDE") then
 		["Rasende Regeneration"] = "Frenzied Regeneration",
 		["Geisterverbindung"] = "Spirit Link",
 		["Rindenhaut (Wild)"] = "Barkskin (Feral)",
-		
+        ["Spott"] = "Taunt",
+        ["Knurren"] = "Growl",
+        ["Hand der Abrechnung"] = "Hand of Reckoning",
+        ["Erdbebenhieb"] = "Earthshaker Slam",
 	}
 elseif (GetLocale() == "frFR") then
-	L = { 
+	L = {
 		["Innervation"] = "Innervate",
 		["Rugissement provocateur"] = "Challenging Roar",
 		["Cri de défi"] = "Challenging Shout",
@@ -72,13 +75,19 @@ elseif (GetLocale() == "frFR") then
 		["Régénération frénétique"] = "Frenzied Regeneration",
 		["Lien spirituel"] = "Spirit Link",
 		["Écorce (sauvage)"] = "Barkskin (Feral)",
-		
+        ["Provocation"] = "Taunt",
+        ["Grondement"] = "Growl",
+        ["Main de justification"] = "Hand of Reckoning",
+        ["Frappe du secoueur de terre"] = "Earthshaker Slam",
 	}
-else
+else -- Default to English
 	L = {
 		["Innervate"] = "Innervate",
 		["Challenging Roar"] = "Challenging Roar",
 		["Challenging Shout"] = "Challenging Shout",
+		["Taunt"] = "Taunt",
+		["Growl"] = "Growl",
+		["Hand of Reckoning"] = "Hand of Reckoning",
 		["Rebirth"] = "Rebirth",
 		["Shield Wall"] = "Shield Wall",
 		["Death Wish"] = "Death Wish",
@@ -100,8 +109,9 @@ else
 		["Frenzied Regeneration"] = "Frenzied Regeneration",
 		["Spirit Link"] = "Spirit Link",
 		["Barkskin (Feral)"] = "Barkskin (Feral)",
+        ["Earthshaker Slam"] = "Earthshaker Slam", -- Added
 	}
-end																	
+end							
 
 -- Tables
 
@@ -113,11 +123,15 @@ sendThrottle = {}
 RatFrames = {}
 Rat_Settings = Rat_Settings or {}
 
-cdtbl = { 
+cdtbl = {
 	["Innervate"] = "Interface\\Icons\\Spell_Nature_Lightning",
 	["Challenging Roar"] = "Interface\\Icons\\Ability_Druid_ChallangingRoar",
 	["Challenging Shout"] = "Interface\\Icons\\Ability_BullRush",
+    ["Taunt"] = "Interface\\Icons\\Spell_Nature_Reincarnation", -- Added
+    ["Growl"] = "Interface\\Icons\\Ability_Physical_Taunt", -- Added
+    ["Hand of Reckoning"] = "Interface\\Icons\\Spell_Holy_UnyieldingFaith", -- Added (Verify icon path)
 	["Rebirth"] = "Interface\\Icons\\Spell_Nature_Reincarnation",
+	["Earthshaker Slam"] = "Interface\\Icons\\Spell_Nature_Earthquake",
 	["Shield Wall"] = "Interface\\Icons\\Ability_Warrior_ShieldWall",
 	["Death Wish"] = "Interface\\Icons\\Spell_Shadow_DeathPact",
 	["Pummel"] = "Interface\\Icons\\INV_Gauntlets_04",
@@ -138,7 +152,6 @@ cdtbl = {
 	["Frenzied Regeneration"] = "Interface\\Icons\\Ability_BullRush",
 	["Spirit Link"] = "Interface\\Icons\\Spell_Shaman_SpiritLink",
 	["Barkskin (Feral)"] = "Interface\\Icons\\Spell_Nature_StoneClawTotem",
-	
 }
 
 Rat_Font = {
@@ -1480,10 +1493,42 @@ function Rat.Options:ConfigFrame()
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Challenging Shout")
+
+		-- Taunt
+	local Checkbox = CreateFrame("CheckButton", "Taunt", self.Warrior, "UICheckButtonTemplate")
+	Checkbox:SetPoint("CENTER",0,-10) -- Placed after Challenging Shout (Y=35)
+	Checkbox:SetWidth(35)
+	Checkbox:SetHeight(35)
+	Checkbox:SetFrameStrata("LOW")
+	Checkbox:SetScript("OnClick", function ()
+		if Checkbox:GetChecked() == nil then
+			Rat_Settings["Taunt"] = nil
+		elseif Checkbox:GetChecked() == 1 then
+			Rat_Settings["Taunt"] = 1
+		end
+		end)
+	Checkbox:SetScript("OnEnter", function()
+		GameTooltip:SetOwner(Checkbox, "ANCHOR_RIGHT");
+		GameTooltip:SetText("Turn on/off", 255, 255, 0, 1, 1);
+		GameTooltip:Show()
+	end)
+	Checkbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Checkbox:SetChecked(Rat_Settings["Taunt"])
+	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
+	Icon:SetTexture(cdtbl["Taunt"])
+	Icon:SetWidth(25)
+	Icon:SetHeight(25)
+	Icon:SetPoint("CENTER",0,0)
+	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
+    text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+    text:SetText("Taunt")
 	
 	-- Death Wish
 	local Checkbox = CreateFrame("CheckButton", "Death Wish", self.Warrior, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-10)
+	Checkbox:SetPoint("CENTER",0,-55)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
@@ -1515,7 +1560,7 @@ function Rat.Options:ConfigFrame()
 	
 	-- Pummel
 	local Checkbox = CreateFrame("CheckButton", "Pummel", self.Warrior, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-55)
+	Checkbox:SetPoint("CENTER",0,-100)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
@@ -1547,7 +1592,7 @@ function Rat.Options:ConfigFrame()
 	
 	-- Disarm
 	local Checkbox = CreateFrame("CheckButton", "Disarm", self.Warrior, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-100)
+	Checkbox:SetPoint("CENTER",0,-145)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
@@ -1808,10 +1853,42 @@ function Rat.Options:ConfigFrame()
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Divine Intervention")
+
+	-- Hand of Reckoning
+	local Checkbox = CreateFrame("CheckButton", "Hand of Reckoning", self.Paladin, "UICheckButtonTemplate")
+	Checkbox:SetPoint("CENTER",0,-100) -- Adjust Y offset as needed (Divine Intervention is at Y=-55)
+	Checkbox:SetWidth(35)
+	Checkbox:SetHeight(35)
+	Checkbox:SetFrameStrata("LOW")
+	Checkbox:SetScript("OnClick", function ()
+		if Checkbox:GetChecked() == nil then
+			Rat_Settings["Hand of Reckoning"] = nil
+		elseif Checkbox:GetChecked() == 1 then
+			Rat_Settings["Hand of Reckoning"] = 1
+		end
+		end)
+	Checkbox:SetScript("OnEnter", function()
+		GameTooltip:SetOwner(Checkbox, "ANCHOR_RIGHT");
+		GameTooltip:SetText("Turn on/off", 255, 255, 0, 1, 1);
+		GameTooltip:Show()
+	end)
+	Checkbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Checkbox:SetChecked(Rat_Settings["Hand of Reckoning"])
+	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
+	Icon:SetTexture(cdtbl["Hand of Reckoning"])
+	Icon:SetWidth(25)
+	Icon:SetHeight(25)
+	Icon:SetPoint("CENTER",0,0)
+	local text = self.Paladin:CreateFontString(nil, "OVERLAY") -- Changed self.Warrior to self.Paladin
+    text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+    text:SetText("Hand of Reckoning")
 	
 	-- Bulwark of the Righteous
 	local Checkbox = CreateFrame("CheckButton", "Bulwark of the Righteous", self.Paladin, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-100)
+	Checkbox:SetPoint("CENTER",0,-145)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
@@ -1834,7 +1911,7 @@ function Rat.Options:ConfigFrame()
 	Icon:SetWidth(25)
 	Icon:SetHeight(25)
 	Icon:SetPoint("CENTER",0,0)
-	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
+	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
     text:SetFont("Fonts\\FRIZQT__.TTF", 12)
 	text:SetTextColor(1, 1, 1, 1)
@@ -1938,6 +2015,38 @@ function Rat.Options:ConfigFrame()
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Spirit Link")
+
+	-- Earthshaker Slam
+	local Checkbox = CreateFrame("CheckButton", "Earthshaker Slam", self.Shaman, "UICheckButtonTemplate")
+	Checkbox:SetPoint("CENTER",0,-55) -- Placed after Spirit Link (Y=-10)
+	Checkbox:SetWidth(35)
+	Checkbox:SetHeight(35)
+	Checkbox:SetFrameStrata("LOW")
+	Checkbox:SetScript("OnClick", function ()
+		if Checkbox:GetChecked() == nil then
+			Rat_Settings["Earthshaker Slam"] = nil
+		elseif Checkbox:GetChecked() == 1 then
+			Rat_Settings["Earthshaker Slam"] = 1
+		end
+		end)
+	Checkbox:SetScript("OnEnter", function()
+		GameTooltip:SetOwner(Checkbox, "ANCHOR_RIGHT");
+		GameTooltip:SetText("Turn on/off", 255, 255, 0, 1, 1);
+		GameTooltip:Show()
+	end)
+	Checkbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Checkbox:SetChecked(Rat_Settings["Earthshaker Slam"])
+	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
+	Icon:SetTexture(cdtbl["Earthshaker Slam"]) -- Make sure this matches the key in cdtbl
+	Icon:SetWidth(25)
+	Icon:SetHeight(25)
+	Icon:SetPoint("CENTER",0,0)
+	local text = self.Shaman:CreateFontString(nil, "OVERLAY")
+    text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+    text:SetText("Earthshaker Slam")
 	
 	-- Hunter
 	
@@ -2070,10 +2179,42 @@ function Rat.Options:ConfigFrame()
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Challenging Roar")
-	
+
+	-- Growl
+	local Checkbox = CreateFrame("CheckButton", "Growl", self.Druid, "UICheckButtonTemplate")
+	Checkbox:SetPoint("CENTER",0,-10) -- Adjust Y offset as needed (Challenging Roar is at Y=35)
+	Checkbox:SetWidth(35)
+	Checkbox:SetHeight(35)
+	Checkbox:SetFrameStrata("LOW")
+	Checkbox:SetScript("OnClick", function ()
+		if Checkbox:GetChecked() == nil then
+			Rat_Settings["Growl"] = nil
+		elseif Checkbox:GetChecked() == 1 then
+			Rat_Settings["Growl"] = 1
+		end
+		end)
+	Checkbox:SetScript("OnEnter", function()
+		GameTooltip:SetOwner(Checkbox, "ANCHOR_RIGHT");
+		GameTooltip:SetText("Turn on/off", 255, 255, 0, 1, 1);
+		GameTooltip:Show()
+	end)
+	Checkbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Checkbox:SetChecked(Rat_Settings["Growl"])
+	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
+	Icon:SetTexture(cdtbl["Growl"])
+	Icon:SetWidth(25)
+	Icon:SetHeight(25)
+	Icon:SetPoint("CENTER",0,0)
+	local text = self.Druid:CreateFontString(nil, "OVERLAY")
+    text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+    text:SetText("Growl")
+
 	-- Tranquility 
 	local Checkbox = CreateFrame("CheckButton", "Tranquility", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-10)
+	Checkbox:SetPoint("CENTER",0,-55)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
@@ -2105,7 +2246,7 @@ function Rat.Options:ConfigFrame()
 
 	-- Barkskin (Feral)
 	local Checkbox = CreateFrame("CheckButton", "Barkskin (Feral)", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-55)
+	Checkbox:SetPoint("CENTER",0,-100)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
@@ -2137,7 +2278,7 @@ function Rat.Options:ConfigFrame()
 
 	-- Frenzied Regeneration
 	local Checkbox = CreateFrame("CheckButton", "Frenzied Regeneration", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-100)
+	Checkbox:SetPoint("CENTER",0,-145)
 	Checkbox:SetWidth(35)
 	Checkbox:SetHeight(35)
 	Checkbox:SetFrameStrata("LOW")
