@@ -3321,28 +3321,3 @@ function rtime(left)
 
 	return string.format("%02d:%02s", min, sec)
 end
-
---
-
-if GetRaidRosterInfo(1) then
-	for i=1,GetNumRaidMembers() do
-		local name = UnitName("raid"..i);
-		local class = UnitClass("raid"..i);
-		local hp = UnitHealth("raid"..i) / UnitHealthMax("raid"..i)
-		if (class == "Warrior" or class == "Warlock") and hp < 0.4 and not buffed("Renew", "raid"..i) then
-			TargetUnit("raid"..i);
-			CastSpellByName("Renew");
-		end
-	end
-elseif  GetNumPartyMembers() > 0 then
-	for i=1,GetNumPartyMembers() do
-		local name = UnitName("party"..i);
-		local class = UnitClass("party"..i);
-		local hp = UnitHealth("party"..i) / UnitHealthMax("party"..i)
-		if (class == "Warrior" or class == "Warlock") and hp < 0.4 and not buffed("Renew", "party"..i) then
-			TargetUnit("party"..i);
-			CastSpellByName("Renew");
-		end 
-	end	
-else 
-end
