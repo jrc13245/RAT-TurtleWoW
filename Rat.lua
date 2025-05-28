@@ -967,7 +967,7 @@ function Rat.Options:ConfigFrame()
 	
 	self:SetFrameStrata("BACKGROUND")
 	self:SetWidth(1015) -- Set these to whatever height/width is needed 
-	self:SetHeight(400) -- for your Texture
+	self:SetHeight(510) -- for your Texture
 	self:SetPoint("CENTER",UIParent,"CENTER",0,0)
 	self:SetMovable(1)
 	self:EnableMouse(1)
@@ -1043,7 +1043,7 @@ function Rat.Options:ConfigFrame()
 	local backdrop = {bgFile = "Interface\\raidframe\\ui-raidframe-groupbg"}  -- path to the background texture
 	self.Background.Tab1:SetFrameStrata("LOW")
 	self.Background.Tab1:SetWidth(1003) -- Set these to whatever height/width is needed 
-	self.Background.Tab1:SetHeight(348) -- for your Texture
+	self.Background.Tab1:SetHeight(430) -- for your Texture
 	self.Background.Tab1:SetBackdrop(backdrop)
 	self.Background.Tab1:SetPoint("TOPLEFT", self, "TOPLEFT", 6, -48)	
 	
@@ -1051,7 +1051,7 @@ function Rat.Options:ConfigFrame()
 	local backdrop = {bgFile = "Interface\\raidframe\\ui-raidframe-groupbg"}  -- path to the background texture
 	self.Background.Tab2:SetFrameStrata("LOW")
 	self.Background.Tab2:SetWidth(1003) -- Set these to whatever height/width is needed 
-	self.Background.Tab2:SetHeight(348) -- for your Texture
+	self.Background.Tab2:SetHeight(430) -- for your Texture
 	self.Background.Tab2:SetBackdrop(backdrop)
 	self.Background.Tab2:SetPoint("TOPLEFT", self, "TOPLEFT", 6, -48)	
 	
@@ -1295,7 +1295,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Warrior")
 	self.Warrior = CreateFrame("Frame",nil,self.Background.Tab1) -- warrior class frame
 	self.Warrior:SetWidth(125)
-	self.Warrior:SetHeight(250)
+	self.Warrior:SetHeight(330)
 	self.Warrior:SetPoint('TOPLEFT', 20, -70)
 	self.Warrior:SetBackdrop(backdrop)
 	self.Warrior:SetBackdropColor(0,0,0,1)
@@ -1310,7 +1310,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Warlock")
 	self.Warlock = CreateFrame("Frame",nil,self.Background.Tab1) -- warlock class frame
 	self.Warlock:SetWidth(125)
-	self.Warlock:SetHeight(250)
+	self.Warlock:SetHeight(330)
 	self.Warlock:SetPoint('TOPLEFT', 160, -70)
 	self.Warlock:SetBackdrop(backdrop)
 	self.Warlock:SetBackdropColor(0,0,0,1)
@@ -1325,7 +1325,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Mage")
 	self.Mage = CreateFrame("Frame",nil,self.Background.Tab1) -- Mage class frame
 	self.Mage:SetWidth(125)
-	self.Mage:SetHeight(250)
+	self.Mage:SetHeight(330)
 	self.Mage:SetPoint('TOPLEFT', 160, -70)
 	self.Mage:SetBackdrop(backdrop)
 	self.Mage:SetBackdropColor(0,0,0,1)
@@ -1340,7 +1340,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Rogue")
 	self.Rogue = CreateFrame("Frame",nil,self.Background.Tab1) -- rogue class frame
 	self.Rogue:SetWidth(125)
-	self.Rogue:SetHeight(250)
+	self.Rogue:SetHeight(330)
 	self.Rogue:SetPoint('TOPLEFT', 300, -70)
 	self.Rogue:SetBackdrop(backdrop)
 	self.Rogue:SetBackdropColor(0,0,0,1)
@@ -1355,7 +1355,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Paladin")
 	self.Paladin = CreateFrame("Frame",nil,self.Background.Tab1) -- paladin class frame
 	self.Paladin:SetWidth(125)
-	self.Paladin:SetHeight(250)
+	self.Paladin:SetHeight(330)
 	self.Paladin:SetPoint('TOPLEFT', 440, -70)
 	self.Paladin:SetBackdrop(backdrop)
 	self.Paladin:SetBackdropColor(0,0,0,1)
@@ -1370,7 +1370,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Hunter")
 	self.Hunter = CreateFrame("Frame",nil,self.Background.Tab1) -- hunter class frame
 	self.Hunter:SetWidth(125)
-	self.Hunter:SetHeight(250)
+	self.Hunter:SetHeight(330)
 	self.Hunter:SetPoint('TOPLEFT', 300, -70)
 	self.Hunter:SetBackdrop(backdrop)
 	self.Hunter:SetBackdropColor(0,0,0,1)
@@ -1385,7 +1385,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Priest")
 	self.Priest = CreateFrame("Frame",nil,self.Background.Tab1) -- Priest class frame
 	self.Priest:SetWidth(125)
-	self.Priest:SetHeight(250)
+	self.Priest:SetHeight(330)
 	self.Priest:SetPoint('TOPLEFT', 580, -70)
 	self.Priest:SetBackdrop(backdrop)
 	self.Priest:SetBackdropColor(0,0,0,1)
@@ -1400,7 +1400,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Druid")
 	self.Druid = CreateFrame("Frame",nil,self.Background.Tab1) -- druid class frame
 	self.Druid:SetWidth(125)
-	self.Druid:SetHeight(250)
+	self.Druid:SetHeight(330)
 	self.Druid:SetPoint('TOPLEFT', 720, -70)
 	self.Druid:SetBackdrop(backdrop)
 	self.Druid:SetBackdropColor(0,0,0,1)
@@ -1415,7 +1415,7 @@ function Rat.Options:ConfigFrame()
 	local r, l, t, b = Rat:ClassPos("Shaman")
 	self.Shaman = CreateFrame("Frame",nil,self.Background.Tab1) -- shaman class frame
 	self.Shaman:SetWidth(125)
-	self.Shaman:SetHeight(250)
+	self.Shaman:SetHeight(330)
 	self.Shaman:SetPoint('TOPLEFT', 860, -70)
 	self.Shaman:SetBackdrop(backdrop)
 	self.Shaman:SetBackdropColor(0,0,0,1)
