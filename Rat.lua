@@ -2,6 +2,51 @@
 --########### By Atreyyo @ VanillaGaming.org - Modified by Mithadana @ Turtle-wow.org
 --##########################################
 
+local HAS_SUPERWOW = (type(SUPERWOW_VERSION) == "string")
+if not HAS_SUPERWOW then
+    DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat]|r SuperWoW not detected. Addon disabled.")
+    return  -- stops executing the rest of the file
+end
+
+
+local RAT_GUID_TO_NAME = {}
+local RAT_NAME_TO_GUID = {}
+
+local function Rat_BuildRaidGUIDIndex()
+	for k in pairs(RAT_GUID_TO_NAME) do RAT_GUID_TO_NAME[k] = nil end
+	for k in pairs(RAT_NAME_TO_GUID) do RAT_NAME_TO_GUID[k] = nil end
+
+    if GetNumRaidMembers and GetNumRaidMembers() > 0 then
+        for i=1, GetNumRaidMembers() do
+            local unit = "raid"..i
+            local name = UnitName(unit)
+            -- SuperWoW: UnitExists also returns GUID
+            local exists, guid = UnitExists(unit)
+            if exists and name and guid then
+                RAT_GUID_TO_NAME[guid] = name
+                RAT_NAME_TO_GUID[name] = guid
+            end
+        end
+    elseif GetNumPartyMembers and GetNumPartyMembers() > 0 then
+        for i=1, GetNumPartyMembers() do
+            local unit = "party"..i
+            local name = UnitName(unit)
+            local exists, guid = UnitExists(unit)
+            if exists and name and guid then
+                RAT_GUID_TO_NAME[guid] = name
+                RAT_NAME_TO_GUID[name] = guid
+            end
+        end
+        -- include player
+        local exists, guid = UnitExists("player")
+        local name = UnitName("player")
+        if exists and name and guid then
+            RAT_GUID_TO_NAME[guid] = name
+            RAT_NAME_TO_GUID[name] = guid
+        end
+    end
+end
+
 Rat = CreateFrame("Button", "Rat", UIParent); -- Create first frame
 Rat.Mainframe = CreateFrame("Frame","RMF",UIParent) -- Create Mainframe
 Rat.Options = CreateFrame("Frame","ROF",UIParent) -- Create Optionsframe
@@ -111,7 +156,51 @@ else -- Default to English
 		["Barkskin (Feral)"] = "Barkskin (Feral)",
         ["Earthshaker Slam"] = "Earthshaker Slam", -- Added
 	}
-end							
+end
+
+local RAT_COOLDOWN = {
+  ["Innervate"]               = 360,   -- 6m (Classic)
+  ["Challenging Roar"]        = 600,   -- 10m
+  ["Challenging Shout"]       = 600,   -- 10m
+  ["Taunt"]                   = 8,
+  ["Growl"]                   = 8,
+  ["Hand of Reckoning"]       = 8,     -- SuperWoW custom taunt (match Taunt)
+  ["Rebirth"]                 = 1800,  -- 30m
+  ["Shield Wall"]             = 1800,  -- 30m
+  ["Death Wish"]              = 180,   -- 3m
+  ["Pummel"]                  = 10,
+  ["Disarm"]                  = 60,
+  ["Major Soulstone"]         = 1800,  -- Soulstone Resurrection (spell) 30m
+  ["Lay on Hands"]            = 3600,  -- 60m
+  ["Blessing of Protection"]  = 300,   -- 5m
+  ["Divine Shield"]           = 300,   -- 5m
+  ["Divine Intervention"]     = 3600,  -- 60m
+  ["Tranquilizing Shot"]      = 0,     -- no cooldown
+  ["Kick"]                    = 10,
+  ["Reincarnation"]           = 3600,  -- 60m (baseline)
+  ["Bulwark of the Righteous"]= 180,   -- Turtle/SuperWoW custom (est.)
+  ["Tranquility"]             = 300,   -- 5m
+  ["Counterspell"]            = 24,
+  ["Earth Shock"]             = 6,
+  ["Lightwell"]               = 300,   -- Turtle/SuperWoW (commonly 5m)
+  ["Frenzied Regeneration"]   = 180,   -- 3m
+  ["Spirit Link"]             = 360,   -- Turtle/SuperWoW custom (est.)
+  ["Barkskin (Feral)"]        = 60,    -- 1m (feral-limited version)
+  ["Earthshaker Slam"]        = 90,    -- Turtle/SuperWoW custom (est.)
+}
+
+-- Optional: warn if RAT_COOLDOWN and L get out of sync
+do
+  local missing, unknown = {}, {}
+  for en,_ in pairs(L) do if not RAT_COOLDOWN[en] then table.insert(missing, en) end end
+  for en,_ in pairs(RAT_COOLDOWN) do if not L[en] then table.insert(unknown, en) end end
+  if next(missing) then
+    DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat]|r Missing cooldown entries: "..table.concat(missing, ", "))
+  end
+  if next(unknown) then
+    DEFAULT_CHAT_FRAME:AddMessage("|cFFFF9900[Rat]|r Unknown keys in RAT_COOLDOWN: "..table.concat(unknown, ", "))
+  end
+end
 
 -- Tables
 
@@ -306,13 +395,13 @@ function RatDefault()
 end
 -- Register events
 
-Rat:RegisterEvent("ADDON_LOADED") 
+Rat:RegisterEvent("ADDON_LOADED")
 Rat:RegisterEvent("RAID_ROSTER_UPDATE")
 Rat:RegisterEvent("PARTY_MEMBERS_CHANGED")
 Rat:RegisterEvent("SPELL_UPDATE_COOLDOWN")
-Rat:RegisterEvent("CHAT_MSG_ADDON")
 Rat:RegisterEvent("BAG_UPDATE_COOLDOWN")
-
+Rat:RegisterEvent("UNIT_CASTEVENT")
+Rat:RegisterEvent("RAW_COMBATLOG")
 -- function to handle events
 
 function Rat:OnEvent()
@@ -329,54 +418,28 @@ function Rat:OnEvent()
 		Rat.Minimap:CreateMinimapIcon()
 		getSpells()
 		getInvCd()
-		sendCds()
+
 		Rat:Update(true)
-	elseif (event == "CHAT_MSG_ADDON") then
-		if string.sub(arg1,1,3) == "RAT" then
-			if Rat_unit ~= arg4 then 
-				if string.sub(arg1,4,7) == "SYNC" then
-					local cd = tonumber(string.sub(arg1, string.find(arg1, "[", 1, true)+1, string.find(arg1, "]", 1, true)-1))
-					local duration = tonumber(arg2)
-					local cdname = string.sub(arg1, string.find(arg1, "(", 1, true)+1, string.find(arg1, ")", 1, true)-1)
-					local name = arg4
-					Rat:AddCd(name,cdname,cd,duration) 
-					getSpells()
-					getInvCd()
-					sendCds()
-					--print(name..": "..cdname)
-					Rat:Update(true)
-				end
-				if string.sub(arg1,4,10) == "VERSION" then
-					if string.sub(arg1,11,15) == "CHECK" then
-						if sendThrottle["version"] == nil or (GetTime() - sendThrottle["version"]) > 10 then
-							SendAddonMessage("RATVERSIONSYNC",Rat_Version,"RAID")
-							sendThrottle["versioncheck"] = GetTime()
-						end
-					end
-					if string.sub(arg1,11,15) == "SYNC" then
-						RatVersionTbl[arg4] = arg2
-						Rat.Version:Check()
-					end
-				end
-			end
-		end
 	elseif (event == "RAID_ROSTER_UPDATE") then
+		Rat_BuildRaidGUIDIndex()
 		getSpells()
 		getInvCd()
 		Rat:Cleardb()
 		Rat:HideVersionNameFrames()
 		Rat:Update(true)
-		sendCds()
+
 	elseif (event == "SPELL_UPDATE_COOLDOWN") then
 		getSpells()
 		getInvCd()
 		Rat:Cleardb()
-		sendCds()
+
 		Rat:Update()
 	elseif (event == "BAG_UPDATE_COOLDOWN") then
-	getInvCd()
-	sendCds()
-	Rat:Update()
+		getInvCd()
+
+		Rat:Update()
+	elseif (event == "UNIT_CASTEVENT") then
+		Rat:OnUnitCastEvent(arg1, arg2, arg3, arg4, arg5) -- casterGUID, targetGUID, eventType, spellID, castDuration
 	end
 end
 
@@ -2787,6 +2850,17 @@ function Rat:msg(text)
 	SendChatMessage(text, channel, nil, chatnumber)
 end
 
+local function Rat_NormalizeAbilityName(localizedName)
+    -- L has entries like ["Innervate"] = "Innervate" (or localized→English).
+    -- We want the EN key used as your canonical ability key.
+    for en, loc in pairs(L) do
+        if localizedName == en or localizedName == loc then
+            return en
+        end
+    end
+    return localizedName -- fallback so it still appears, if you add it later
+end
+
 -- functions to list all abilities on cooldown into our table
 
 function getInvCd()
@@ -2803,13 +2877,13 @@ function getInvCd()
 							if duration > 2.5 then
 								local timeleft = duration-(GetTime()-s_time)
 								if (duration-math.floor(timeleft)) == 0 then
-									SendAddonMessage("RATSYNC["..duration.."]("..k..")",timeleft,"RAID")
+
 									RatTbl[Rat_unit][k]["duration"] = timeleft+GetTime()
 									RatTbl[Rat_unit][k]["cd"] = duration
 									sendThrottle[k] = GetTime()
 								end
 								if sendThrottle[k] == nil or (GetTime() - sendThrottle[k]) > 10 then
-									SendAddonMessage("RATSYNC["..duration.."]("..k..")",timeleft,"RAID")
+
 									RatTbl[Rat_unit][k]["duration"] = timeleft+GetTime()
 									RatTbl[Rat_unit][k]["cd"] = duration
 									sendThrottle[k] = GetTime()
@@ -2868,63 +2942,6 @@ function getSpells()
 	end
 end
 
--- function to send our cooldowns to the raid
-
-function sendCds()
-	local gcd = 0
-	local spellID = 1
-	local spell = GetSpellName(spellID, BOOKTYPE_SPELL)
-	if RatTbl[Rat_unit] == nil then RatTbl[Rat_unit] = { } end
-	while (spell) do
-		local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
-		if hasCooldown and duration > 3 then
-			gcd=gcd+1
-		end		
-		spellID = spellID + 1
-		spell = GetSpellName(spellID, BOOKTYPE_SPELL)		
-	end
-	if (gcd / spellID) > 0.5 then
-		gcd = true
-		--print("true")
-		else
-		gcd = false
-		--print("false")
-	end
-	spellID = 1
-	spell = GetSpellName(spellID, BOOKTYPE_SPELL)
-	while (spell) do
-		local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
-		for k,v in pairs(RatTbl[Rat_unit]) do
-			if k == spell and not gcd then		
-				if hasCooldown == 1 and duration > 3 then
-				local timeleft = duration-(GetTime()-start)
-					if (RatTbl[Rat_unit][k]["cd"]-math.floor(timeleft)) == 0 then
-						SendAddonMessage("RATSYNC["..duration.."]("..L[k]..")",timeleft,"RAID")
-						sendThrottle[k] = GetTime()
-					end
-					if sendThrottle[k] == nil or (GetTime() - sendThrottle[k]) > 10 then
-						SendAddonMessage("RATSYNC["..duration.."]("..L[k]..")",timeleft,"RAID")
-						sendThrottle[k] = GetTime()
-					end
-				else
-				end
-			end
-		end		
-		spellID = spellID + 1
-		spell = GetSpellName(spellID, BOOKTYPE_SPELL)
-	end
-	if sendThrottle["Major Soulstone"] == nil or (GetTime() - sendThrottle["Major Soulstone"]) > 10 then
-		if (RatTbl[Rat_unit]["Major Soulstone"]) then
-			if RatTbl[Rat_unit]["Major Soulstone"]["duration"]-GetTime() > 0 then
-				SendAddonMessage("RATSYNC["..RatTbl[Rat_unit]["Major Soulstone"]["cd"].."](Major Soulstone)",RatTbl[Rat_unit]["Major Soulstone"]["duration"]-GetTime(),"RAID")
-			else
-			end
-			sendThrottle["Major Soulstone"] = GetTime()
-		end
-	end
-	sendAddMsg = GetTime()
-end
-
 -- add an ability cooldown we got from a raidmember
 
 function Rat:AddCd(name,cdname,cd,duration)
@@ -2963,7 +2980,7 @@ function Rat:Cleardb()
 		for name,_ in pairs(RatTbl) do
 			if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
 				for ability, dura in pairs(RatTbl[name]) do
-					local rframe = name..ability
+					local rframe = name.."."..ability
 					RatFrames[rframe]:Hide()
 				end
 				RatTbl[name]=nil
@@ -2973,7 +2990,7 @@ function Rat:Cleardb()
 		for name,_ in pairs(RatTbl) do
 			if name ~= UnitName("player") then
 				for ability, dura in pairs(RatTbl[name]) do
-					local rframe = name..ability
+					local rframe = name.."."..ability
 					RatFrames[rframe]:Hide()
 				end
 				RatTbl[name]=nil
@@ -3001,6 +3018,29 @@ function Rat:HideVersionNameFrames()
 		end
 	end
 	Rat.Version:Check()
+end
+
+function Rat:OnUnitCastEvent(casterGUID, targetGUID, eventType, spellID, castDur)
+    if eventType ~= "CAST" and eventType ~= "CHANNEL" and eventType ~= "START" then
+        return
+    end
+    local name = RAT_GUID_TO_NAME[casterGUID]
+    if not name then
+        -- Rebuild once if unknown (late join or cache stale)
+        Rat_BuildRaidGUIDIndex()
+        name = RAT_GUID_TO_NAME[casterGUID]
+        if not name then return end
+    end
+
+    local sName = SpellInfo(spellID)
+    if not sName then return end
+
+    local key = Rat_NormalizeAbilityName(sName)
+    local cd = RAT_COOLDOWN[key]
+    if not cd or cd <= 0 then return end
+
+    -- Reuse your existing sink; this keeps UI/update logic untouched.
+    Rat:AddCd(name, key, cd, cd)
 end
 
 -- function to get classcolors from a player
