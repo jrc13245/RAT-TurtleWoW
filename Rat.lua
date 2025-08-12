@@ -3014,51 +3014,52 @@ function Rat:InRaidCheck(name)
 	end
 end
 
--- function to clear our database, we don't want cooldowns from people not in raid.
-
+-- SAFER: clear bars/entries for people no longer in raid
 function Rat:Cleardb()
-	if GetRaidRosterInfo(1) then
-		for name,_ in pairs(RatTbl) do
-			if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
-				for ability, dura in pairs(RatTbl[name]) do
-					local rframe = name.."."..ability
-					RatFrames[rframe]:Hide()
-				end
-				RatTbl[name]=nil
-			end
-		end
-	else
-		for name,_ in pairs(RatTbl) do
-			if name ~= UnitName("player") then
-				for ability, dura in pairs(RatTbl[name]) do
-					local rframe = name.."."..ability
-					RatFrames[rframe]:Hide()
-				end
-				RatTbl[name]=nil
-			end
-		end
-	end
+  if GetRaidRosterInfo(1) then
+    for name,_ in pairs(RatTbl) do
+      if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
+        for ability, _ in pairs(RatTbl[name]) do
+          local rframe = name .. "." .. ability
+          local f = RatFrames[rframe]
+          if f and f.Hide then f:Hide() end
+        end
+        RatTbl[name] = nil
+      end
+    end
+  else
+    -- not in a raid at all: clear everyone except player
+    for name,_ in pairs(RatTbl) do
+      if name ~= UnitName("player") then
+        for ability, _ in pairs(RatTbl[name]) do
+          local rframe = name .. "." .. ability
+          local f = RatFrames[rframe]
+          if f and f.Hide then f:Hide() end
+        end
+        RatTbl[name] = nil
+      end
+    end
+  end
 end
 
--- hides version frames for players not in raid anymore for our version check frame
-
+-- SAFER: version-name frames (if any) on roster changes
 function Rat:HideVersionNameFrames()
-	if GetRaidRosterInfo(1) then
-		for name,frame in pairs(VersionFTbl) do
-			if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
-				frame:Hide()
-				RatVersionTbl[name] = nil
-			end
-		end
-	else
-		for name,frame in pairs(VersionFTbl) do
-			if name ~= UnitName("player") then
-				frame:Hide()
-				RatVersionTbl[name] = nil
-			end
-		end
-	end
-	Rat.Version:Check()
+  if GetRaidRosterInfo(1) then
+    for name, frame in pairs(VersionFTbl) do
+      if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
+        if frame and frame.Hide then frame:Hide() end
+        RatVersionTbl[name] = nil
+      end
+    end
+  else
+    for name, frame in pairs(VersionFTbl) do
+      if name ~= UnitName("player") then
+        if frame and frame.Hide then frame:Hide() end
+        RatVersionTbl[name] = nil
+      end
+    end
+  end
+  Rat.Version:Check()
 end
 
 function Rat:OnUnitCastEvent(casterGUID, targetGUID, eventType, spellID, castDur)
