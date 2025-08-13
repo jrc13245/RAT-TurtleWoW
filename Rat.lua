@@ -159,36 +159,40 @@ else -- Default to English
 end
 
 local RAT_COOLDOWN = {
-  ["Innervate"]               = 360,   -- 6m (Classic)
-  ["Challenging Roar"]        = 600,   -- 10m
-  ["Challenging Shout"]       = 600,   -- 10m
-  ["Taunt"]                   = 8,
-  ["Growl"]                   = 8,
-  ["Hand of Reckoning"]       = 8,     -- SuperWoW custom taunt (match Taunt)
-  ["Rebirth"]                 = 1800,  -- 30m
-  ["Shield Wall"]             = 1800,  -- 30m
+  -- Short Cooldowns (< 1 minute)
+  ["Earth Shock"]             = 6,     -- 6s
+  ["Earthshaker Slam"]        = 10,    -- 10s
+  ["Growl"]                   = 10,    -- 10s
+  ["Hand of Reckoning"]       = 10,    -- 10s
+  ["Kick"]                    = 10,    -- 10s
+  ["Pummel"]                  = 10,    -- 10s
+  ["Taunt"]                   = 10,    -- 10s
+  ["Tranquilizing Shot"]      = 20,    -- 20s
+  ["Counterspell"]            = 30,    -- 30s
+  ["Disarm"]                  = 60,    -- 1m
+
+  -- Medium Cooldowns (1-10 minutes)
+  ["Bulwark of the Righteous"]= 180,   -- 3m
   ["Death Wish"]              = 180,   -- 3m
-  ["Pummel"]                  = 10,
-  ["Disarm"]                  = 60,
-  ["Major Soulstone"]         = 1800,  -- Soulstone Resurrection (spell) 30m
-  ["Lay on Hands"]            = 3600,  -- 60m
   ["Blessing of Protection"]  = 300,   -- 5m
   ["Divine Shield"]           = 300,   -- 5m
-  ["Divine Intervention"]     = 3600,  -- 60m
-  ["Tranquilizing Shot"]      = 0,     -- no cooldown
-  ["Kick"]                    = 10,
-  ["Reincarnation"]           = 3600,  -- 60m (baseline)
-  ["Bulwark of the Righteous"]= 180,   -- Turtle/SuperWoW custom (est.)
-  ["Tranquility"]             = 1800,   -- 30m
-  ["Counterspell"]            = 24,
-  ["Earth Shock"]             = 6,
-  ["Lightwell"]               = 300,   -- Turtle/SuperWoW (commonly 5m)
-  ["Frenzied Regeneration"]   = 180,   -- 3m
-  ["Spirit Link"]             = 360,   -- Turtle/SuperWoW custom (est.)
-  ["Barkskin (Feral)"]        = 600,    -- 10m (feral-limited version)
-  ["Earthshaker Slam"]        = 90,    -- Turtle/SuperWoW custom (est.)
-}
+  ["Frenzied Regeneration"]   = 300,   -- 5m
+  ["Innervate"]               = 360,   -- 6m
+  ["Spirit Link"]             = 360,   -- 6m
+  ["Barkskin (Feral)"]        = 600,   -- 10m
+  ["Challenging Roar"]        = 600,   -- 10m
+  ["Challenging Shout"]       = 600,   -- 10m
+  ["Lightwell"]               = 600,   -- 10m
 
+  -- Long Cooldowns (> 10 minutes)
+  ["Major Soulstone"]         = 1800,  -- 30m
+  ["Rebirth"]                 = 1800,  -- 30m
+  ["Shield Wall"]             = 1800,  -- 30m
+  ["Tranquility"]             = 1800,  -- 30m
+  ["Divine Intervention"]     = 3600,  -- 60m
+  ["Lay on Hands"]            = 3600,  -- 60m
+  ["Reincarnation"]           = 3600,  -- 60m
+}
 -- Optional: warn if RAT_COOLDOWN and L get out of sync
 do
   local missing, unknown = {}, {}
