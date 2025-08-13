@@ -179,13 +179,13 @@ local RAT_COOLDOWN = {
   ["Kick"]                    = 10,
   ["Reincarnation"]           = 3600,  -- 60m (baseline)
   ["Bulwark of the Righteous"]= 180,   -- Turtle/SuperWoW custom (est.)
-  ["Tranquility"]             = 300,   -- 5m
+  ["Tranquility"]             = 1800,   -- 30m
   ["Counterspell"]            = 24,
   ["Earth Shock"]             = 6,
   ["Lightwell"]               = 300,   -- Turtle/SuperWoW (commonly 5m)
   ["Frenzied Regeneration"]   = 180,   -- 3m
   ["Spirit Link"]             = 360,   -- Turtle/SuperWoW custom (est.)
-  ["Barkskin (Feral)"]        = 60,    -- 1m (feral-limited version)
+  ["Barkskin (Feral)"]        = 600,    -- 10m (feral-limited version)
   ["Earthshaker Slam"]        = 90,    -- Turtle/SuperWoW custom (est.)
 }
 
@@ -3361,3 +3361,4 @@ function rtime(left)
 
 	return string.format("%02d:%02s", min, sec)
 end
+
