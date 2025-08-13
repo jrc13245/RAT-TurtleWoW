@@ -426,7 +426,17 @@ function Rat:OnEvent()
 		getInvCd()
 
 		Rat:Update(true)
+
 	elseif (event == "RAID_ROSTER_UPDATE") then
+		Rat_BuildRaidGUIDIndex()
+		getSpells()
+		getInvCd()
+		Rat:Cleardb()
+		Rat:HideVersionNameFrames()
+		Rat:Update(true)
+
+	-- added so leaving/joining party updates roster and resorts cooldowns
+	elseif (event == "PARTY_MEMBERS_CHANGED") then
 		Rat_BuildRaidGUIDIndex()
 		getSpells()
 		getInvCd()
@@ -448,6 +458,7 @@ function Rat:OnEvent()
 		Rat:OnUnitCastEvent(arg1, arg2, arg3, arg4, arg5) -- casterGUID, targetGUID, eventType, spellID, castDuration
 	end
 end
+
 
 -- function to check version
 
@@ -3020,33 +3031,31 @@ end
 
 -- SAFER: clear bars/entries for people no longer in raid
 function Rat:Cleardb()
-  if GetRaidRosterInfo(1) then
-    for name,_ in pairs(RatTbl) do
-      if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
-        for ability, _ in pairs(RatTbl[name]) do
-          local rframe = name .. "." .. ability
-          local f = RatFrames[rframe]
-          if f and f.Hide then f:Hide() end
-        end
-        RatTbl[name] = nil
-      end
-    end
-  else
-    -- not in a raid at all: clear everyone except player
-    for name,_ in pairs(RatTbl) do
-      if name ~= UnitName("player") then
-        for ability, _ in pairs(RatTbl[name]) do
-          local rframe = name .. "." .. ability
-          local f = RatFrames[rframe]
-          if f and f.Hide then f:Hide() end
-        end
-        RatTbl[name] = nil
-      end
-    end
-  end
+	if GetRaidRosterInfo(1) then
+		for name,_ in pairs(RatTbl) do
+			if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
+				for ability, dura in pairs(RatTbl[name]) do
+					local rframe = name.."."..ability
+					RatFrames[rframe]:Hide()
+				end
+				RatTbl[name]=nil
+			end
+		end
+	else
+		for name,_ in pairs(RatTbl) do
+			if name ~= UnitName("player") then
+				for ability, dura in pairs(RatTbl[name]) do
+					-- fixed concatenation bug here
+					local rframe = name.."."..ability
+					RatFrames[rframe]:Hide()
+				end
+				RatTbl[name]=nil
+			end
+		end
+	end
 end
 
--- SAFER: version-name frames (if any) on roster changes
+-- hides version frames for players not in raid anymore for our version check frame
 function Rat:HideVersionNameFrames()
   if GetRaidRosterInfo(1) then
     for name, frame in pairs(VersionFTbl) do
@@ -3269,7 +3278,8 @@ function Rat:Update(force)
 			for name,_ in pairs(RatTbl) do
 				for ability, _ in pairs(RatTbl[name]) do
 					if RatTbl[name][ability]["duration"] == skey and RatTbl[name][ability]["cd"] ~= nil then
-						local tname = name..ability
+						-- fix: include the dot in the frame key
+						local tname = name.."."..ability
 						local texture = cdtbl[ability]
 						local bardecay = 1-((RatTbl[name][ability]["cd"]-(RatTbl[name][ability]["duration"]-GetTime())) / RatTbl[name][ability]["cd"])
 						local cdtime = rtime(RatTbl[name][ability]["duration"]-GetTime())
@@ -3282,6 +3292,10 @@ function Rat:Update(force)
 						Rat.Mainframe.Background.Top.Title:SetFont("Interface\\AddOns\\Rat\\fonts\\"..Rat_Font[Rat_Settings["font"]]..".TTF", Rat_FontSize[Rat_Settings["font"]]+1)
 						frame:SetWidth(Rat.Mainframe:GetWidth()-4)
 						frame:SetHeight(22)
+
+						-- fix: clear stale anchors before positioning to prevent stacking
+						frame:ClearAllPoints()
+
 						if Rat_Settings["Invert"] == nil then
 							frame:SetPoint("TOPLEFT",2,(-22*i)+2)
 						else
@@ -3342,6 +3356,7 @@ function Rat:Update(force)
 		end
 	end
 end
+
 
 -- slash commands
 
