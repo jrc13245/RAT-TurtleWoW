@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: Rat SuperWoW Edition!
-## Author: Atreyyo - Edited by Mithadana
-## Version: 1.12
+## Author: Atreyyo, Mithadana, Torio
+## Version: 1.20
 ## Notes: Raid Ability Tracker
 ## DefaultState: Enabled
 ## LoadOnDemand: 0

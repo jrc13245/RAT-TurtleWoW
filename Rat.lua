@@ -3,6 +3,7 @@
 --##########################################
 
 local HAS_SUPERWOW = (type(SUPERWOW_VERSION) == "string")
+local HAS_NAMPOWER = (type(GetNampowerVersion) == "function")
 if not HAS_SUPERWOW then
     DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat]|r SuperWoW not detected. Addon disabled.")
     return  -- stops executing the rest of the file
@@ -37,13 +38,13 @@ local function Rat_BuildRaidGUIDIndex()
                 RAT_NAME_TO_GUID[name] = guid
             end
         end
-        -- include player
-        local exists, guid = UnitExists("player")
-        local name = UnitName("player")
-        if exists and name and guid then
-            RAT_GUID_TO_NAME[guid] = name
-            RAT_NAME_TO_GUID[name] = guid
-        end
+    end
+    -- always include player
+    local exists, guid = UnitExists("player")
+    local name = UnitName("player")
+    if exists and name and guid then
+        RAT_GUID_TO_NAME[guid] = name
+        RAT_NAME_TO_GUID[name] = guid
     end
 end
 
@@ -59,6 +60,7 @@ Rat_Version = GetAddOnMetadata("Rat", "Version")
 RAT_CP_OBJ=nil
 RAT_CP_TYPE=nil
 Rat_unit = UnitName("player")
+Rat_Debug = false
 
 -- loacalization
 local L = {}
@@ -93,6 +95,7 @@ if (GetLocale() == "deDE") then
         ["Knurren"] = "Growl",
         ["Hand der Abrechnung"] = "Hand of Reckoning",
         ["Erdbebenhieb"] = "Earthshaker Slam",
+        ["Powerful Smelling Salts"] = "Powerful Smelling Salts", -- TODO: add German translation
 	}
 elseif (GetLocale() == "frFR") then
 	L = {
@@ -124,6 +127,7 @@ elseif (GetLocale() == "frFR") then
         ["Grondement"] = "Growl",
         ["Main de justification"] = "Hand of Reckoning",
         ["Frappe du secoueur de terre"] = "Earthshaker Slam",
+        ["Powerful Smelling Salts"] = "Powerful Smelling Salts", -- TODO: add French translation
 	}
 else -- Default to English
 	L = {
@@ -155,6 +159,7 @@ else -- Default to English
 		["Spirit Link"] = "Spirit Link",
 		["Barkskin (Feral)"] = "Barkskin (Feral)",
         ["Earthshaker Slam"] = "Earthshaker Slam", -- Added
+        ["Powerful Smelling Salts"] = "Powerful Smelling Salts",
 	}
 end
 
@@ -185,6 +190,7 @@ local RAT_COOLDOWN = {
   ["Lightwell"]               = 600,   -- 10m
 
   -- Long Cooldowns (> 10 minutes)
+  ["Powerful Smelling Salts"] = 21600, -- 6h
   ["Major Soulstone"]         = 1800,  -- 30m
   ["Rebirth"]                 = 1800,  -- 30m
   ["Shield Wall"]             = 1800,  -- 30m
@@ -204,6 +210,20 @@ do
   if next(unknown) then
     DEFAULT_CHAT_FRAME:AddMessage("|cFFFF9900[Rat]|r Unknown keys in RAT_COOLDOWN: "..table.concat(unknown, ", "))
   end
+end
+
+-- Load custom spells from saved settings into L and RAT_COOLDOWN
+function Rat_LoadCustomSpells()
+	Rat_Settings["custom_spells"] = Rat_Settings["custom_spells"] or {}
+	for _, entry in ipairs(Rat_Settings["custom_spells"]) do
+		if entry.name and entry.cd then
+			L[entry.name] = entry.name
+			RAT_COOLDOWN[entry.name] = entry.cd
+			if Rat_Settings[entry.name] == nil then
+				Rat_Settings[entry.name] = 1
+			end
+		end
+	end
 end
 
 -- Tables
@@ -245,6 +265,28 @@ cdtbl = {
 	["Frenzied Regeneration"] = "Interface\\Icons\\Ability_BullRush",
 	["Spirit Link"] = "Interface\\Icons\\Spell_Shaman_SpiritLink",
 	["Barkskin (Feral)"] = "Interface\\Icons\\Spell_Nature_StoneClawTotem",
+	["Powerful Smelling Salts"] = "Interface\\Icons\\INV_Misc_Ammo_Gunpowder_01",
+}
+
+-- BigWigs SpellRequests short name → Rat ability key
+local RAT_BW_SPELL_MAP = {
+	["bop"] = "Blessing of Protection",
+	["ivate"] = "Innervate",
+	["spiritlink"] = "Spirit Link",
+	["tranquility"] = "Tranquility",
+	["cshout"] = "Challenging Shout",
+	["brez"] = "Rebirth",
+	["fearward"] = "Fear Ward",
+	["sunwell"] = "Grace of the Sunwell",
+}
+
+-- BigWigs CommonAuras sync token → Rat ability key
+local RAT_BW_AURA_MAP = {
+	["BWCASW"] = "Shield Wall",
+	["BWCACS"] = "Challenging Shout",
+	["BWCACR"] = "Challenging Roar",
+	["BWCASL"] = "Spirit Link",
+	["BWCADI"] = "Divine Intervention",
 }
 
 Rat_Font = {
@@ -405,7 +447,12 @@ Rat:RegisterEvent("PARTY_MEMBERS_CHANGED")
 Rat:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 Rat:RegisterEvent("BAG_UPDATE_COOLDOWN")
 Rat:RegisterEvent("UNIT_CASTEVENT")
+Rat:RegisterEvent("CHAT_MSG_ADDON")
 Rat:RegisterEvent("RAW_COMBATLOG")
+if HAS_NAMPOWER then
+	Rat:RegisterEvent("SPELL_GO_OTHER")
+	Rat:RegisterEvent("SPELL_GO_SELF")
+end
 -- function to handle events
 
 function Rat:OnEvent()
@@ -422,10 +469,20 @@ function Rat:OnEvent()
 		Rat.Options:ConfigFrame()
 		Rat.Version:ConfigFrame()
 		Rat.Minimap:CreateMinimapIcon()
+		Rat_LoadCustomSpells()
 		getSpells()
 		getInvCd()
 
 		Rat:Update(true)
+
+		if HAS_NAMPOWER then
+			SetCVar("NP_EnableSpellGoEvents", "1")
+		end
+		-- broadcast version to group
+		local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+		if channel then
+			SendAddonMessage("RAT_VER", Rat_Version, channel)
+		end
 
 	elseif (event == "RAID_ROSTER_UPDATE") then
 		Rat_BuildRaidGUIDIndex()
@@ -434,6 +491,11 @@ function Rat:OnEvent()
 		Rat:Cleardb()
 		Rat:HideVersionNameFrames()
 		Rat:Update(true)
+		-- broadcast version on roster change
+		local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+		if channel then
+			SendAddonMessage("RAT_VER", Rat_Version, channel)
+		end
 
 	-- added so leaving/joining party updates roster and resorts cooldowns
 	elseif (event == "PARTY_MEMBERS_CHANGED") then
@@ -443,6 +505,11 @@ function Rat:OnEvent()
 		Rat:Cleardb()
 		Rat:HideVersionNameFrames()
 		Rat:Update(true)
+		-- broadcast version on roster change
+		local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+		if channel then
+			SendAddonMessage("RAT_VER", Rat_Version, channel)
+		end
 
 	elseif (event == "SPELL_UPDATE_COOLDOWN") then
 		getSpells()
@@ -456,6 +523,12 @@ function Rat:OnEvent()
 		Rat:Update()
 	elseif (event == "UNIT_CASTEVENT") then
 		Rat:OnUnitCastEvent(arg1, arg2, arg3, arg4, arg5) -- casterGUID, targetGUID, eventType, spellID, castDuration
+	elseif (event == "SPELL_GO_OTHER") then
+		Rat:OnSpellGoOther(arg1, arg2, arg3, arg4, arg5, arg6, arg7) -- itemId, spellId, casterGuid, targetGuid, castFlags, numHit, numMissed
+	elseif (event == "SPELL_GO_SELF") then
+		Rat:OnSpellGoSelf(arg1, arg2, arg3, arg4) -- itemId, spellId, targetGuid, castFlags
+	elseif (event == "CHAT_MSG_ADDON") then
+		Rat:OnAddonMessage(arg1, arg2, arg3, arg4) -- prefix, message, channel, sender
 	end
 end
 
@@ -1070,31 +1143,63 @@ function Rat.Options:ConfigFrame()
 		this:StopMovingOrSizing()
 	end
 
-	local backdrop = {
-			edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-			bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-			tile="false",
-			tileSize="4",
-			edgeSize="8",
-			insets={
-				left="2",
-				right="2",
-				top="2",
-				bottom="2"
-			}
-	}
+	local darkBackdrop = { bgFile="Interface/Tooltips/UI-Tooltip-Background", edgeFile="Interface/Tooltips/UI-Tooltip-Border", edgeSize=6, insets={left=1,right=1,top=1,bottom=1} }
+	local panelBackdrop = { bgFile="Interface/Tooltips/UI-Tooltip-Background", edgeFile="Interface/Tooltips/UI-Tooltip-Border", edgeSize=4, insets={left=1,right=1,top=1,bottom=1} }
+	local flatBackdrop = { bgFile="Interface/Tooltips/UI-Tooltip-Background" }
+
+	local C_BG        = { 0.05, 0.05, 0.05, 0.95 }
+	local C_PANEL     = { 0.08, 0.08, 0.08, 1 }
+	local C_COLUMN    = { 0.06, 0.06, 0.06, 1 }
+	local C_BORDER    = { 0.15, 0.15, 0.15, 1 }
+	local C_TAB_ON    = { 0.12, 0.12, 0.12, 1 }
+	local C_TAB_OFF   = { 0, 0, 0, 0 }
+	local C_TAB_HOVER = { 0.18, 0.18, 0.18, 0.8 }
+	local C_ACCENT    = { 0.3, 0.6, 1.0, 0.8 }
+	local C_TEXT      = { 0.9, 0.9, 0.9, 1 }
+	local C_TEXT_DIM  = { 0.6, 0.6, 0.6, 1 }
+
+	local function StyleCheckbox(cb, icon)
+		cb:SetNormalTexture("")
+		cb:SetPushedTexture("")
+		cb:SetHighlightTexture("")
+		cb:SetCheckedTexture("")
+		local check = cb:CreateTexture(nil, "OVERLAY")
+		check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+		check:SetWidth(20)
+		check:SetHeight(20)
+		check:SetPoint("BOTTOMRIGHT", 4, -4)
+		if cb:GetChecked() then
+			icon:SetVertexColor(1, 1, 1)
+			check:Show()
+		else
+			icon:SetVertexColor(0.4, 0.4, 0.4)
+			check:Hide()
+		end
+		local oldClick = cb:GetScript("OnClick")
+		cb:SetScript("OnClick", function()
+			if oldClick then oldClick() end
+			if cb:GetChecked() then
+				icon:SetVertexColor(1, 1, 1)
+				check:Show()
+			else
+				icon:SetVertexColor(0.4, 0.4, 0.4)
+				check:Hide()
+			end
+		end)
+	end
 
 	self:SetFrameStrata("BACKGROUND")
-	self:SetWidth(1015) -- Set these to whatever height/width is needed
-	self:SetHeight(510) -- for your Texture
+	self:SetWidth(1015)
+	self:SetHeight(510)
 	self:SetPoint("CENTER",UIParent,"CENTER",0,0)
 	self:SetMovable(1)
 	self:EnableMouse(1)
 	self:RegisterForDrag("LeftButton")
 	self:SetScript("OnDragStart", Rat.Options.Drag.StartMoving)
 	self:SetScript("OnDragStop", Rat.Options.Drag.StopMovingOrSizing)
-	self:SetBackdrop(backdrop) --border around the frame
-	self:SetBackdropColor(0,0,0,1);
+	self:SetBackdrop(darkBackdrop)
+	self:SetBackdropColor(unpack(C_BG))
+	self:SetBackdropBorderColor(unpack(C_BORDER))
 
 	-- background
 	self.Background = {} -- Background Frame table
@@ -1107,78 +1212,72 @@ function Rat.Options:ConfigFrame()
 	self.Background.Bottomright =  CreateFrame("Frame",nil,self) -- Bottomright Background Frame
 	self.Background.Tab1 =  CreateFrame("Frame",nil,self) -- Mid Background Frame
 	self.Background.Tab2 =  CreateFrame("Frame",nil,self) -- Mid Background Frame
+	self.Background.Tab3 =  CreateFrame("Frame",nil,self) -- Custom spells tab
 	self.Background.Button1 =  CreateFrame("Button",nil,self) -- Mid Background Frame
 	self.Background.Button2 =  CreateFrame("Button",nil,self) -- Mid Background Frame
+	self.Background.Button3 =  CreateFrame("Button",nil,self) -- Custom tab button
 
-	-- Topleft Background Frame
-	local backdrop = {bgFile = "Interface\\auctionframe\\ui-auctionframe-bid-topleft"}  -- path to the background texture
-	self.Background.Topleft:SetFrameStrata("BACKGROUND")
-	self.Background.Topleft:SetWidth(200) -- Set these to whatever height/width is needed
-	self.Background.Topleft:SetHeight(200) -- for your Texture
-	self.Background.Topleft:SetBackdrop(backdrop)
-	self.Background.Topleft:SetPoint("TOPLEFT", self, -7, 9)
-
-	-- Topmid Background Frame
-	local backdrop = {bgFile = "Interface\\auctionframe\\ui-auctionframe-auction-top"}  -- path to the background texture
-	self.Background.Topmid:SetFrameStrata("BACKGROUND")
-	self.Background.Topmid:SetWidth(640) -- Set these to whatever height/width is needed
-	self.Background.Topmid:SetHeight(200) -- for your Texture
-	self.Background.Topmid:SetBackdrop(backdrop)
-	self.Background.Topmid:SetPoint("TOPLEFT", self, "TOPLEFT", 193, 9)
-
-	-- Topright Background Frame
-	local backdrop = {bgFile = "Interface\\auctionframe\\ui-auctionframe-auction-topright"}  -- path to the background texture
-	self.Background.Topright:SetFrameStrata("BACKGROUND")
-	self.Background.Topright:SetWidth(200) -- Set these to whatever height/width is needed
-	self.Background.Topright:SetHeight(200) -- for your Texture
-	self.Background.Topright:SetBackdrop(backdrop)
-	self.Background.Topright:SetPoint("TOPLEFT", self, "TOPLEFT", 815, 9)
-
-	-- Bottomleft Background Frame
-	local backdrop = {bgFile = "Interface\\auctionframe\\ui-auctionframe-bid-botleft"}  -- path to the background texture
-	self.Background.Bottomleft:SetFrameStrata("BACKGROUND")
-	self.Background.Bottomleft:SetWidth(200) -- Set these to whatever height/width is needed
-	self.Background.Bottomleft:SetHeight(296) -- for your Texture
-	self.Background.Bottomleft:SetBackdrop(backdrop)
-	self.Background.Bottomleft:SetPoint("TOPLEFT", self, "TOPLEFT", -7, -191)
-
-	-- Bottommid Background Frame
-	local backdrop = {bgFile = "Interface\\auctionframe\\ui-auctionframe-auction-bot"}  -- path to the background texture
-	self.Background.Bottommid:SetFrameStrata("BACKGROUND")
-	self.Background.Bottommid:SetWidth(640) -- Set these to whatever height/width is needed
-	self.Background.Bottommid:SetHeight(296) -- for your Texture
-	self.Background.Bottommid:SetBackdrop(backdrop)
-	self.Background.Bottommid:SetPoint("TOPLEFT", self, "TOPLEFT", 193, -191)
-
-	-- Bottomright Background Frame
-	local backdrop = {bgFile = "Interface\\auctionframe\\ui-auctionframe-browse-botright"}  -- path to the background texture
-	self.Background.Bottomright:SetFrameStrata("BACKGROUND")
-	self.Background.Bottomright:SetWidth(200) -- Set these to whatever height/width is needed
-	self.Background.Bottomright:SetHeight(296) -- for your Texture
-	self.Background.Bottomright:SetBackdrop(backdrop)
-	self.Background.Bottomright:SetPoint("TOPLEFT", self, "TOPLEFT", 815, -191)
+	-- Hide auction house textures (not needed with dark flat UI)
+	self.Background.Topleft:Hide()
+	self.Background.Topmid:Hide()
+	self.Background.Topright:Hide()
+	self.Background.Bottomleft:Hide()
+	self.Background.Bottommid:Hide()
+	self.Background.Bottomright:Hide()
 
 	-- Tab1 Background Frame
-	local backdrop = {bgFile = "Interface\\raidframe\\ui-raidframe-groupbg"}  -- path to the background texture
 	self.Background.Tab1:SetFrameStrata("LOW")
-	self.Background.Tab1:SetWidth(1003) -- Set these to whatever height/width is needed
-	self.Background.Tab1:SetHeight(430) -- for your Texture
-	self.Background.Tab1:SetBackdrop(backdrop)
+	self.Background.Tab1:SetWidth(1003)
+	self.Background.Tab1:SetHeight(430)
+	self.Background.Tab1:SetBackdrop(panelBackdrop)
+	self.Background.Tab1:SetBackdropColor(unpack(C_PANEL))
+	self.Background.Tab1:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Background.Tab1:SetPoint("TOPLEFT", self, "TOPLEFT", 6, -48)
 
 	-- Tab2 Background Frame
-	local backdrop = {bgFile = "Interface\\raidframe\\ui-raidframe-groupbg"}  -- path to the background texture
 	self.Background.Tab2:SetFrameStrata("LOW")
-	self.Background.Tab2:SetWidth(1003) -- Set these to whatever height/width is needed
-	self.Background.Tab2:SetHeight(430) -- for your Texture
-	self.Background.Tab2:SetBackdrop(backdrop)
+	self.Background.Tab2:SetWidth(1003)
+	self.Background.Tab2:SetHeight(430)
+	self.Background.Tab2:SetBackdrop(panelBackdrop)
+	self.Background.Tab2:SetBackdropColor(unpack(C_PANEL))
+	self.Background.Tab2:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Background.Tab2:SetPoint("TOPLEFT", self, "TOPLEFT", 6, -48)
+
+	-- Tab3 Background Frame
+	self.Background.Tab3:SetFrameStrata("LOW")
+	self.Background.Tab3:SetWidth(1003)
+	self.Background.Tab3:SetHeight(430)
+	self.Background.Tab3:SetBackdrop(panelBackdrop)
+	self.Background.Tab3:SetBackdropColor(unpack(C_PANEL))
+	self.Background.Tab3:SetBackdropBorderColor(unpack(C_BORDER))
+	self.Background.Tab3:SetPoint("TOPLEFT", self, "TOPLEFT", 6, -48)
 
 	-- Tab buttons
 
+	-- Tab button accent lines
+	self.Background.Button1Accent = self.Background.Button1:CreateTexture(nil, "OVERLAY")
+	self.Background.Button1Accent:SetHeight(1)
+	self.Background.Button1Accent:SetPoint("BOTTOMLEFT", 0, 0)
+	self.Background.Button1Accent:SetPoint("BOTTOMRIGHT", 0, 0)
+	self.Background.Button1Accent:SetTexture(unpack(C_ACCENT))
+
+	self.Background.Button2Accent = self.Background.Button2:CreateTexture(nil, "OVERLAY")
+	self.Background.Button2Accent:SetHeight(1)
+	self.Background.Button2Accent:SetPoint("BOTTOMLEFT", 0, 0)
+	self.Background.Button2Accent:SetPoint("BOTTOMRIGHT", 0, 0)
+	self.Background.Button2Accent:SetTexture(unpack(C_ACCENT))
+	self.Background.Button2Accent:Hide()
+
+	self.Background.Button3Accent = self.Background.Button3:CreateTexture(nil, "OVERLAY")
+	self.Background.Button3Accent:SetHeight(1)
+	self.Background.Button3Accent:SetPoint("BOTTOMLEFT", 0, 0)
+	self.Background.Button3Accent:SetPoint("BOTTOMRIGHT", 0, 0)
+	self.Background.Button3Accent:SetTexture(unpack(C_ACCENT))
+	self.Background.Button3Accent:Hide()
+
 	-- Button1
-	self.Background.Button1:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background"})
-	self.Background.Button1:SetBackdropColor(0,0,0,0.6)
+	self.Background.Button1:SetBackdrop(flatBackdrop)
+	self.Background.Button1:SetBackdropColor(unpack(C_TAB_ON))
 	self.Background.Button1:SetFrameStrata("MEDIUM")
 	self.Background.Button1:SetPoint("TOPLEFT", self, "TOPLEFT", 80, -25)
 	self.Background.Button1:SetWidth(85)
@@ -1186,29 +1285,37 @@ function Rat.Options:ConfigFrame()
 	self.Background.Button1:SetScript("OnClick", function()
 		self.Background.Tab1:Show()
 		self.Background.Tab2:Hide()
-		self.Background.Button2:SetBackdropColor(1,1,1,0)
+		self.Background.Tab3:Hide()
+		self.Background.Button1:SetBackdropColor(unpack(C_TAB_ON))
+		self.Background.Button2:SetBackdropColor(unpack(C_TAB_OFF))
+		self.Background.Button3:SetBackdropColor(unpack(C_TAB_OFF))
+		self.Background.Button1Accent:Show()
+		self.Background.Button2Accent:Hide()
+		self.Background.Button3Accent:Hide()
 	end)
 	self.Background.Button1:SetScript("OnEnter", function()
-		self.Background.Button1:SetBackdropColor(1,1,1,0.6)
+		if not self.Background.Tab1:IsVisible() then
+			self.Background.Button1:SetBackdropColor(unpack(C_TAB_HOVER))
+		end
 	end)
 	self.Background.Button1:SetScript("OnLeave", function()
 		if self.Background.Tab1:IsVisible() then
-			self.Background.Button1:SetBackdropColor(0,0,0,0.6)
+			self.Background.Button1:SetBackdropColor(unpack(C_TAB_ON))
 		else
-			self.Background.Button1:SetBackdropColor(1,1,1,0)
+			self.Background.Button1:SetBackdropColor(unpack(C_TAB_OFF))
 		end
 	end)
 
 	local text = self.Background.Button1:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("CENTER", 0, 0)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Class options")
 
 	-- Button2
-	self.Background.Button2:SetBackdrop({bgFile = "Interface/Tooltips/UI-Tooltip-Background"})
-	self.Background.Button2:SetBackdropColor(1,1,1,0)
+	self.Background.Button2:SetBackdrop(flatBackdrop)
+	self.Background.Button2:SetBackdropColor(unpack(C_TAB_OFF))
 	self.Background.Button2:SetFrameStrata("MEDIUM")
 	self.Background.Button2:SetPoint("TOPLEFT", self, "TOPLEFT", 180, -25)
 	self.Background.Button2:SetWidth(60)
@@ -1216,27 +1323,74 @@ function Rat.Options:ConfigFrame()
 	self.Background.Button2:SetScript("OnClick", function()
 		self.Background.Tab2:Show()
 		self.Background.Tab1:Hide()
-		self.Background.Button1:SetBackdropColor(1,1,1,0)
+		self.Background.Tab3:Hide()
+		self.Background.Button2:SetBackdropColor(unpack(C_TAB_ON))
+		self.Background.Button1:SetBackdropColor(unpack(C_TAB_OFF))
+		self.Background.Button3:SetBackdropColor(unpack(C_TAB_OFF))
+		self.Background.Button2Accent:Show()
+		self.Background.Button1Accent:Hide()
+		self.Background.Button3Accent:Hide()
 	end)
 	self.Background.Button2:SetScript("OnEnter", function()
-		self.Background.Button2:SetBackdropColor(1,1,1,0.6)
+		if not self.Background.Tab2:IsVisible() then
+			self.Background.Button2:SetBackdropColor(unpack(C_TAB_HOVER))
+		end
 	end)
 	self.Background.Button2:SetScript("OnLeave", function()
 		if self.Background.Tab2:IsVisible() then
-			self.Background.Button2:SetBackdropColor(0,0,0,0.6)
+			self.Background.Button2:SetBackdropColor(unpack(C_TAB_ON))
 		else
-			self.Background.Button2:SetBackdropColor(1,1,1,0)
+			self.Background.Button2:SetBackdropColor(unpack(C_TAB_OFF))
 		end
 	end)
 
 	local text = self.Background.Button2:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("CENTER", 0, 0)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Settings")
 
-	self.Background.Tab2:Hide() -- hides second tab at start
+	-- Button3
+	self.Background.Button3:SetBackdrop(flatBackdrop)
+	self.Background.Button3:SetBackdropColor(unpack(C_TAB_OFF))
+	self.Background.Button3:SetFrameStrata("MEDIUM")
+	self.Background.Button3:SetPoint("TOPLEFT", self, "TOPLEFT", 255, -25)
+	self.Background.Button3:SetWidth(60)
+	self.Background.Button3:SetHeight(20)
+	self.Background.Button3:SetScript("OnClick", function()
+		self.Background.Tab3:Show()
+		self.Background.Tab1:Hide()
+		self.Background.Tab2:Hide()
+		self.Background.Button3:SetBackdropColor(unpack(C_TAB_ON))
+		self.Background.Button1:SetBackdropColor(unpack(C_TAB_OFF))
+		self.Background.Button2:SetBackdropColor(unpack(C_TAB_OFF))
+		self.Background.Button3Accent:Show()
+		self.Background.Button1Accent:Hide()
+		self.Background.Button2Accent:Hide()
+	end)
+	self.Background.Button3:SetScript("OnEnter", function()
+		if not self.Background.Tab3:IsVisible() then
+			self.Background.Button3:SetBackdropColor(unpack(C_TAB_HOVER))
+		end
+	end)
+	self.Background.Button3:SetScript("OnLeave", function()
+		if self.Background.Tab3:IsVisible() then
+			self.Background.Button3:SetBackdropColor(unpack(C_TAB_ON))
+		else
+			self.Background.Button3:SetBackdropColor(unpack(C_TAB_OFF))
+		end
+	end)
+
+	local text = self.Background.Button3:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 0)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Custom")
+
+	self.Background.Tab2:Hide()
+	self.Background.Tab3:Hide()
 
 	-- Scale slider
 
@@ -1258,9 +1412,9 @@ function Rat.Options:ConfigFrame()
 
 	local text = self.Background.Slider:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("CENTER", 0, 15)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Scale")
 
 	-- Buttons for color picker
@@ -1268,15 +1422,8 @@ function Rat.Options:ConfigFrame()
 	local backdrop = {
 			edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
 			bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-			tile="false",
-			tileSize="4",
-			edgeSize="4",
-			insets={
-				left="2",
-				right="2",
-				top="2",
-				bottom="2"
-			}
+			edgeSize=3,
+			insets={left=1,right=1,top=1,bottom=1}
 	}
 
 	-- top bar
@@ -1297,9 +1444,9 @@ function Rat.Options:ConfigFrame()
 
 	local text = self.Background.topbarcolor:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("LEFT", 40, 0)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Title bar color")
 
 
@@ -1321,9 +1468,9 @@ function Rat.Options:ConfigFrame()
 
 	local text = self.Background.abilitybarcolor:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("LEFT", 40, 0)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Ability bar color")
 
 	-- ability text
@@ -1344,9 +1491,9 @@ function Rat.Options:ConfigFrame()
 
 	local text = self.Background.abilitytextcolor:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("LEFT", 40, 0)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Ability text color")
 
 	-- font dropdown
@@ -1356,9 +1503,9 @@ function Rat.Options:ConfigFrame()
 
 	local text = self.FontDropdown:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("LEFT", 165, 2)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Font")
 
 	UIDropDownMenu_Initialize(self.FontDropdown, Rat.Options.FontDrop)
@@ -1371,189 +1518,285 @@ function Rat.Options:ConfigFrame()
 
 	local text = self.BarTextureDropdown:CreateFontString(nil, "OVERLAY")
 	text:SetPoint("LEFT", 165, 2)
-	text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
 	text:SetText("Bar texture")
 
 	UIDropDownMenu_Initialize(self.BarTextureDropdown, Rat.Options.BarTextureDrop)
 	UIDropDownMenu_SetSelectedID(self.BarTextureDropdown, Rat_Settings["bartexture"])
 
-	-- border
-	self.left = self.Background.Tab1:CreateTexture(nil, "BORDER")
-	self.left:SetWidth(502.5)
-	self.left:SetHeight(2)
-	self.left:SetPoint('TOPLEFT', -70, -60)
-	self.left:SetTexture(1, 1, 1, 1)
-	self.left:SetGradientAlpha("Horizontal", 0, 0, 0, 0, 1, 1, 1, 0.8)
+	-- Accent separator line (top of tab content)
+	self.accentLine = self.Background.Tab1:CreateTexture(nil, "BORDER")
+	self.accentLine:SetHeight(1)
+	self.accentLine:SetPoint('TOPLEFT', 5, -2)
+	self.accentLine:SetPoint('TOPRIGHT', -5, -2)
+	self.accentLine:SetTexture(unpack(C_ACCENT))
 
-	self.right = self.Background.Tab1:CreateTexture(nil, "BORDER")
-	self.right:SetWidth(502.5)
-	self.right:SetHeight(2)
-	self.right:SetPoint('TOPRIGHT', 70, -60)
-	self.right:SetTexture(1, 1, 1, 1)
-	self.right:SetGradientAlpha("Horizontal", 1, 1, 1, 0.8, 0, 0, 0, 0)
-
-	-- Class icons
-
-		local backdrop = {
-		edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-		bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-		tile="true",
-		tileSize="8",
-		edgeSize="8",
-		insets={
-				left="2",
-				right="2",
-				top="2",
-				bottom="2"
-			}
-		}
+	-- Any (class-agnostic abilities)
+	self.Any = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Any:SetWidth(90)
+	self.Any:SetHeight(420)
+	self.Any:SetPoint('TOPLEFT', 7, -5)
+	self.Any:SetBackdrop(panelBackdrop)
+	self.Any:SetBackdropColor(unpack(C_COLUMN))
+	self.Any:SetBackdropBorderColor(unpack(C_BORDER))
+	self.Any.Icon = self.Any:CreateTexture(nil, 'ARTWORK')
+	self.Any.Icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+	self.Any.Icon:SetPoint('CENTER', 0, 160)
+	self.Any.Icon:SetWidth(22)
+	self.Any.Icon:SetHeight(22)
 
 	-- Warrior
 	local r, l, t, b = Rat:ClassPos("Warrior")
-	self.Warrior = CreateFrame("Frame",nil,self.Background.Tab1) -- warrior class frame
-	self.Warrior:SetWidth(125)
-	self.Warrior:SetHeight(330)
-	self.Warrior:SetPoint('TOPLEFT', 20, -70)
-	self.Warrior:SetBackdrop(backdrop)
-	self.Warrior:SetBackdropColor(0,0,0,1)
+	self.Warrior = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Warrior:SetWidth(90)
+	self.Warrior:SetHeight(420)
+	self.Warrior:SetPoint('TOPLEFT', 107, -5)
+	self.Warrior:SetBackdrop(panelBackdrop)
+	self.Warrior:SetBackdropColor(unpack(C_COLUMN))
+	self.Warrior:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Warrior.Icon = self.Warrior:CreateTexture(nil, 'ARTWORK')
 	self.Warrior.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Warrior.Icon:SetTexCoord(r, l, t, b)
-	self.Warrior.Icon:SetPoint('CENTER', 0, 155)
-	self.Warrior.Icon:SetWidth(25)
-	self.Warrior.Icon:SetHeight(25)
+	self.Warrior.Icon:SetPoint('CENTER', 0, 160)
+	self.Warrior.Icon:SetWidth(22)
+	self.Warrior.Icon:SetHeight(22)
+	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Warrior")
 
 	-- Warlock
 	local r, l, t, b = Rat:ClassPos("Warlock")
-	self.Warlock = CreateFrame("Frame",nil,self.Background.Tab1) -- warlock class frame
-	self.Warlock:SetWidth(125)
-	self.Warlock:SetHeight(330)
-	self.Warlock:SetPoint('TOPLEFT', 160, -70)
-	self.Warlock:SetBackdrop(backdrop)
-	self.Warlock:SetBackdropColor(0,0,0,1)
+	self.Warlock = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Warlock:SetWidth(90)
+	self.Warlock:SetHeight(420)
+	self.Warlock:SetPoint('TOPLEFT', 207, -5)
+	self.Warlock:SetBackdrop(panelBackdrop)
+	self.Warlock:SetBackdropColor(unpack(C_COLUMN))
+	self.Warlock:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Warlock.Icon = self.Warlock:CreateTexture(nil, 'ARTWORK')
 	self.Warlock.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Warlock.Icon:SetTexCoord(r, l, t, b)
-	self.Warlock.Icon:SetPoint('CENTER', -20,155)
-	self.Warlock.Icon:SetWidth(25)
-	self.Warlock.Icon:SetHeight(25)
+	self.Warlock.Icon:SetPoint('CENTER', 0, 160)
+	self.Warlock.Icon:SetWidth(22)
+	self.Warlock.Icon:SetHeight(22)
+	local text = self.Warlock:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Warlock")
 
 	-- Mage
 	local r, l, t, b = Rat:ClassPos("Mage")
-	self.Mage = CreateFrame("Frame",nil,self.Background.Tab1) -- Mage class frame
-	self.Mage:SetWidth(125)
-	self.Mage:SetHeight(330)
-	self.Mage:SetPoint('TOPLEFT', 160, -70)
-	self.Mage:SetBackdrop(backdrop)
-	self.Mage:SetBackdropColor(0,0,0,1)
+	self.Mage = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Mage:SetWidth(90)
+	self.Mage:SetHeight(420)
+	self.Mage:SetPoint('TOPLEFT', 307, -5)
+	self.Mage:SetBackdrop(panelBackdrop)
+	self.Mage:SetBackdropColor(unpack(C_COLUMN))
+	self.Mage:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Mage.Icon = self.Mage:CreateTexture(nil, 'ARTWORK')
 	self.Mage.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Mage.Icon:SetTexCoord(r, l, t, b)
-	self.Mage.Icon:SetPoint('CENTER', 20,155)
-	self.Mage.Icon:SetWidth(25)
-	self.Mage.Icon:SetHeight(25)
+	self.Mage.Icon:SetPoint('CENTER', 0, 160)
+	self.Mage.Icon:SetWidth(22)
+	self.Mage.Icon:SetHeight(22)
+	local text = self.Mage:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Mage")
 
 	-- Rogue
 	local r, l, t, b = Rat:ClassPos("Rogue")
-	self.Rogue = CreateFrame("Frame",nil,self.Background.Tab1) -- rogue class frame
-	self.Rogue:SetWidth(125)
-	self.Rogue:SetHeight(330)
-	self.Rogue:SetPoint('TOPLEFT', 300, -70)
-	self.Rogue:SetBackdrop(backdrop)
-	self.Rogue:SetBackdropColor(0,0,0,1)
+	self.Rogue = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Rogue:SetWidth(90)
+	self.Rogue:SetHeight(420)
+	self.Rogue:SetPoint('TOPLEFT', 407, -5)
+	self.Rogue:SetBackdrop(panelBackdrop)
+	self.Rogue:SetBackdropColor(unpack(C_COLUMN))
+	self.Rogue:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Rogue.Icon = self.Rogue:CreateTexture(nil, 'ARTWORK')
 	self.Rogue.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Rogue.Icon:SetTexCoord(r, l, t, b)
-	self.Rogue.Icon:SetPoint('CENTER', 20,155)
-	self.Rogue.Icon:SetWidth(25)
-	self.Rogue.Icon:SetHeight(25)
+	self.Rogue.Icon:SetPoint('CENTER', 0, 160)
+	self.Rogue.Icon:SetWidth(22)
+	self.Rogue.Icon:SetHeight(22)
+	local text = self.Rogue:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Rogue")
 
 	-- Paladin
 	local r, l, t, b = Rat:ClassPos("Paladin")
-	self.Paladin = CreateFrame("Frame",nil,self.Background.Tab1) -- paladin class frame
-	self.Paladin:SetWidth(125)
-	self.Paladin:SetHeight(330)
-	self.Paladin:SetPoint('TOPLEFT', 440, -70)
-	self.Paladin:SetBackdrop(backdrop)
-	self.Paladin:SetBackdropColor(0,0,0,1)
+	self.Paladin = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Paladin:SetWidth(90)
+	self.Paladin:SetHeight(420)
+	self.Paladin:SetPoint('TOPLEFT', 607, -5)
+	self.Paladin:SetBackdrop(panelBackdrop)
+	self.Paladin:SetBackdropColor(unpack(C_COLUMN))
+	self.Paladin:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Paladin.Icon = self.Paladin:CreateTexture(nil, 'ARTWORK')
 	self.Paladin.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Paladin.Icon:SetTexCoord(r, l, t, b)
-	self.Paladin.Icon:SetPoint('CENTER', 0,155)
-	self.Paladin.Icon:SetWidth(25)
-	self.Paladin.Icon:SetHeight(25)
+	self.Paladin.Icon:SetPoint('CENTER', 0, 160)
+	self.Paladin.Icon:SetWidth(22)
+	self.Paladin.Icon:SetHeight(22)
+	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Paladin")
 
 	-- Hunter
 	local r, l, t, b = Rat:ClassPos("Hunter")
-	self.Hunter = CreateFrame("Frame",nil,self.Background.Tab1) -- hunter class frame
-	self.Hunter:SetWidth(125)
-	self.Hunter:SetHeight(330)
-	self.Hunter:SetPoint('TOPLEFT', 300, -70)
-	self.Hunter:SetBackdrop(backdrop)
-	self.Hunter:SetBackdropColor(0,0,0,1)
+	self.Hunter = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Hunter:SetWidth(90)
+	self.Hunter:SetHeight(420)
+	self.Hunter:SetPoint('TOPLEFT', 507, -5)
+	self.Hunter:SetBackdrop(panelBackdrop)
+	self.Hunter:SetBackdropColor(unpack(C_COLUMN))
+	self.Hunter:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Hunter.Icon = self.Hunter:CreateTexture(nil, 'ARTWORK')
 	self.Hunter.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Hunter.Icon:SetTexCoord(r, l, t, b)
-	self.Hunter.Icon:SetPoint('CENTER', -20,155)
-	self.Hunter.Icon:SetWidth(25)
-	self.Hunter.Icon:SetHeight(25)
+	self.Hunter.Icon:SetPoint('CENTER', 0, 160)
+	self.Hunter.Icon:SetWidth(22)
+	self.Hunter.Icon:SetHeight(22)
+	local text = self.Hunter:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Hunter")
 
 	-- Priest
 	local r, l, t, b = Rat:ClassPos("Priest")
-	self.Priest = CreateFrame("Frame",nil,self.Background.Tab1) -- Priest class frame
-	self.Priest:SetWidth(125)
-	self.Priest:SetHeight(330)
-	self.Priest:SetPoint('TOPLEFT', 580, -70)
-	self.Priest:SetBackdrop(backdrop)
-	self.Priest:SetBackdropColor(0,0,0,1)
+	self.Priest = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Priest:SetWidth(90)
+	self.Priest:SetHeight(420)
+	self.Priest:SetPoint('TOPLEFT', 707, -5)
+	self.Priest:SetBackdrop(panelBackdrop)
+	self.Priest:SetBackdropColor(unpack(C_COLUMN))
+	self.Priest:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Priest.Icon = self.Priest:CreateTexture(nil, 'ARTWORK')
 	self.Priest.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Priest.Icon:SetTexCoord(r, l, t, b)
-	self.Priest.Icon:SetPoint('CENTER', 0,155)
-	self.Priest.Icon:SetWidth(25)
-	self.Priest.Icon:SetHeight(25)
+	self.Priest.Icon:SetPoint('CENTER', 0, 160)
+	self.Priest.Icon:SetWidth(22)
+	self.Priest.Icon:SetHeight(22)
+	local text = self.Priest:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Priest")
 
 	-- Druid
 	local r, l, t, b = Rat:ClassPos("Druid")
-	self.Druid = CreateFrame("Frame",nil,self.Background.Tab1) -- druid class frame
-	self.Druid:SetWidth(125)
-	self.Druid:SetHeight(330)
-	self.Druid:SetPoint('TOPLEFT', 720, -70)
-	self.Druid:SetBackdrop(backdrop)
-	self.Druid:SetBackdropColor(0,0,0,1)
+	self.Druid = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Druid:SetWidth(90)
+	self.Druid:SetHeight(420)
+	self.Druid:SetPoint('TOPLEFT', 807, -5)
+	self.Druid:SetBackdrop(panelBackdrop)
+	self.Druid:SetBackdropColor(unpack(C_COLUMN))
+	self.Druid:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Druid.Icon = self.Druid:CreateTexture(nil, 'ARTWORK')
 	self.Druid.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Druid.Icon:SetTexCoord(r, l, t, b)
-	self.Druid.Icon:SetPoint('CENTER', 0,155)
-	self.Druid.Icon:SetWidth(25)
-	self.Druid.Icon:SetHeight(25)
+	self.Druid.Icon:SetPoint('CENTER', 0, 160)
+	self.Druid.Icon:SetWidth(22)
+	self.Druid.Icon:SetHeight(22)
+	local text = self.Druid:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Druid")
 
 	-- Shaman
 	local r, l, t, b = Rat:ClassPos("Shaman")
-	self.Shaman = CreateFrame("Frame",nil,self.Background.Tab1) -- shaman class frame
-	self.Shaman:SetWidth(125)
-	self.Shaman:SetHeight(330)
-	self.Shaman:SetPoint('TOPLEFT', 860, -70)
-	self.Shaman:SetBackdrop(backdrop)
-	self.Shaman:SetBackdropColor(0,0,0,1)
+	self.Shaman = CreateFrame("Frame",nil,self.Background.Tab1)
+	self.Shaman:SetWidth(90)
+	self.Shaman:SetHeight(420)
+	self.Shaman:SetPoint('TOPLEFT', 907, -5)
+	self.Shaman:SetBackdrop(panelBackdrop)
+	self.Shaman:SetBackdropColor(unpack(C_COLUMN))
+	self.Shaman:SetBackdropBorderColor(unpack(C_BORDER))
 	self.Shaman.Icon = self.Shaman:CreateTexture(nil, 'ARTWORK')
 	self.Shaman.Icon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
 	self.Shaman.Icon:SetTexCoord(r, l, t, b)
-	self.Shaman.Icon:SetPoint('CENTER', 0,155)
-	self.Shaman.Icon:SetHeight(25)
-	self.Shaman.Icon:SetWidth(25)
+	self.Shaman.Icon:SetPoint('CENTER', 0, 160)
+	self.Shaman.Icon:SetHeight(22)
+	self.Shaman.Icon:SetWidth(22)
+	local text = self.Shaman:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Shaman")
 
 	-- checkboxes
+
+	-- Any --
+
+	-- "Any" label
+	local text = self.Any:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("CENTER", 0, 190)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+	text:SetText("Any")
+
+	-- Powerful Smelling Salts
+	local Checkbox = CreateFrame("CheckButton", "Powerful Smelling Salts", self.Any, "UICheckButtonTemplate")
+	Checkbox:SetPoint("CENTER",0,80)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
+	Checkbox:SetFrameStrata("LOW")
+	Checkbox:SetScript("OnClick", function ()
+		if Checkbox:GetChecked() == nil then
+			Rat_Settings["Powerful Smelling Salts"] = nil
+		elseif Checkbox:GetChecked() == 1 then
+			Rat_Settings["Powerful Smelling Salts"] = 1
+		end
+		end)
+	Checkbox:SetScript("OnEnter", function()
+		GameTooltip:SetOwner(Checkbox, "ANCHOR_RIGHT");
+		GameTooltip:SetText("Turn on/off", 255, 255, 0, 1, 1);
+		GameTooltip:Show()
+	end)
+	Checkbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Checkbox:SetChecked(Rat_Settings["Powerful Smelling Salts"])
+	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
+	Icon:SetTexture(cdtbl["Powerful Smelling Salts"])
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
+	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
+	local text = self.Any:CreateFontString(nil, "OVERLAY")
+    text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+    text:SetText("Smelling Salts")
 
 	-- Warrior --
 
 	-- Shield Wall
 	local Checkbox = CreateFrame("CheckButton", "Shield Wall", self.Warrior, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1571,12 +1814,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Shield Wall"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Shield Wall"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Shield Wall")
@@ -1584,8 +1828,8 @@ function Rat.Options:ConfigFrame()
 	-- Challenging Shout
 	local Checkbox = CreateFrame("CheckButton", "Challenging Shout", self.Warrior, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1603,12 +1847,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Challenging Shout"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Challenging Shout"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Challenging Shout")
@@ -1616,8 +1861,8 @@ function Rat.Options:ConfigFrame()
 		-- Taunt
 	local Checkbox = CreateFrame("CheckButton", "Taunt", self.Warrior, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-10) -- Placed after Challenging Shout (Y=35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1635,12 +1880,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Taunt"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Taunt"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Taunt")
@@ -1648,8 +1894,8 @@ function Rat.Options:ConfigFrame()
 	-- Death Wish
 	local Checkbox = CreateFrame("CheckButton", "Death Wish", self.Warrior, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-55)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1667,12 +1913,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Death Wish"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Death Wish"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Death Wish")
@@ -1680,8 +1927,8 @@ function Rat.Options:ConfigFrame()
 	-- Pummel
 	local Checkbox = CreateFrame("CheckButton", "Pummel", self.Warrior, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-100)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1699,12 +1946,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Pummel"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Pummel"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Pummel")
@@ -1712,8 +1960,8 @@ function Rat.Options:ConfigFrame()
 	-- Disarm
 	local Checkbox = CreateFrame("CheckButton", "Disarm", self.Warrior, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-145)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1731,12 +1979,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Disarm"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Disarm"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warrior:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Disarm")
@@ -1746,8 +1995,8 @@ function Rat.Options:ConfigFrame()
 	-- Major Soulstone
 	local Checkbox = CreateFrame("CheckButton", "Major Soulstone", self.Warlock, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1765,12 +2014,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Major Soulstone"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Major Soulstone"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Warlock:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Major Soulstone")
@@ -1779,9 +2029,9 @@ function Rat.Options:ConfigFrame()
 
 	-- Counterspell
 	local Checkbox = CreateFrame("CheckButton", "Counterspell", self.Mage, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,80)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1799,12 +2049,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Counterspell"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Counterspell"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Mage:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Counterspell")
@@ -1813,9 +2064,9 @@ function Rat.Options:ConfigFrame()
 
 	-- Kick
 	local Checkbox = CreateFrame("CheckButton", "Kick", self.Rogue, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,80)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1833,12 +2084,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Kick"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Kick"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Rogue:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Kick")
@@ -1848,8 +2100,8 @@ function Rat.Options:ConfigFrame()
 	-- Lay on Hands
 	local Checkbox = CreateFrame("CheckButton", "Lay on Hands", self.Paladin, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1867,12 +2119,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Lay on Hands"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Lay on Hands"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Lay on Hands")
@@ -1880,8 +2133,8 @@ function Rat.Options:ConfigFrame()
 	-- Blessing of Protection
 	local Checkbox = CreateFrame("CheckButton", "Blessing of Protection", self.Paladin, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1899,12 +2152,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Blessing of Protection"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Blessing of Protection"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Blessing of Protection")
@@ -1912,8 +2166,8 @@ function Rat.Options:ConfigFrame()
 	-- Divine Shield
 	local Checkbox = CreateFrame("CheckButton", "Divine Shield", self.Paladin, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-10)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1931,12 +2185,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Divine Shield"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Divine Shield"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Divine Shield")
@@ -1944,8 +2199,8 @@ function Rat.Options:ConfigFrame()
 	-- Divine Intervention
 	local Checkbox = CreateFrame("CheckButton", "Divine Intervention", self.Paladin, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-55)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1963,12 +2218,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Divine Intervention"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Divine Intervention"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Divine Intervention")
@@ -1976,8 +2232,8 @@ function Rat.Options:ConfigFrame()
 	-- Hand of Reckoning
 	local Checkbox = CreateFrame("CheckButton", "Hand of Reckoning", self.Paladin, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-100) -- Adjust Y offset as needed (Divine Intervention is at Y=-55)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -1995,12 +2251,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Hand of Reckoning"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Hand of Reckoning"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Paladin:CreateFontString(nil, "OVERLAY") -- Changed self.Warrior to self.Paladin
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Hand of Reckoning")
@@ -2008,8 +2265,8 @@ function Rat.Options:ConfigFrame()
 	-- Bulwark of the Righteous
 	local Checkbox = CreateFrame("CheckButton", "Bulwark of the Righteous", self.Paladin, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-145)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2027,12 +2284,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Bulwark of the Righteous"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Bulwark of the Righteous"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Paladin:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Bulwark of the Righteous")
@@ -2042,8 +2300,8 @@ function Rat.Options:ConfigFrame()
 	-- Reincarnation
 	local Checkbox = CreateFrame("CheckButton", "Reincarnation", self.Shaman, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2061,12 +2319,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Reincarnation"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Reincarnation"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Shaman:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Reincarnation")
@@ -2074,8 +2333,8 @@ function Rat.Options:ConfigFrame()
 	-- Earth Shock
 	local Checkbox = CreateFrame("CheckButton", "Earth Shock", self.Shaman, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2093,12 +2352,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Earth Shock"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Earth Shock"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Shaman:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Earth Shock")
@@ -2106,8 +2366,8 @@ function Rat.Options:ConfigFrame()
 	-- Spirit Link
 	local Checkbox = CreateFrame("CheckButton", "Spirit Link", self.Shaman, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-10)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2125,12 +2385,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Spirit Link"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Spirit Link"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Shaman:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Spirit Link")
@@ -2138,8 +2399,8 @@ function Rat.Options:ConfigFrame()
 	-- Earthshaker Slam
 	local Checkbox = CreateFrame("CheckButton", "Earthshaker Slam", self.Shaman, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,-55) -- Placed after Spirit Link (Y=-10)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2157,12 +2418,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Earthshaker Slam"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Earthshaker Slam"]) -- Make sure this matches the key in cdtbl
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Shaman:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Earthshaker Slam")
@@ -2172,8 +2434,8 @@ function Rat.Options:ConfigFrame()
 	-- Tranquilizing Shot
 	local Checkbox = CreateFrame("CheckButton", "Tranquilizing Shot", self.Hunter, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2191,12 +2453,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Tranquilizing Shot"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Tranquilizing Shot"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Hunter:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Tranquilizing Shot")
@@ -2205,9 +2468,9 @@ function Rat.Options:ConfigFrame()
 
 	-- Innervate
 	local Checkbox = CreateFrame("CheckButton", "Innervate", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",-25,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,80)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2225,21 +2488,22 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Innervate"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Innervate"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Innervate")
 
 	-- Rebirth
 	local Checkbox = CreateFrame("CheckButton", "Rebirth", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",25,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2257,21 +2521,22 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Rebirth"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Rebirth"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Rebirth")
 
 	-- Challenging Roar
 	local Checkbox = CreateFrame("CheckButton", "Challenging Roar", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,-10)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2289,21 +2554,22 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Challenging Roar"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Challenging Roar"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Challenging Roar")
 
 	-- Growl
 	local Checkbox = CreateFrame("CheckButton", "Growl", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-10) -- Adjust Y offset as needed (Challenging Roar is at Y=35)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,-55) -- Adjust Y offset as needed (Challenging Roar is at Y=35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2321,21 +2587,22 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Growl"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Growl"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Growl")
 
 	-- Tranquility
 	local Checkbox = CreateFrame("CheckButton", "Tranquility", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-55)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,-100)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2353,21 +2620,22 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Tranquility"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Tranquility"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Tranquility")
 
 	-- Barkskin (Feral)
 	local Checkbox = CreateFrame("CheckButton", "Barkskin (Feral)", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-100)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,-145)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2385,21 +2653,22 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Barkskin (Feral)"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Barkskin (Feral)"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Barkskin (Feral)")
 
 	-- Frenzied Regeneration
 	local Checkbox = CreateFrame("CheckButton", "Frenzied Regeneration", self.Druid, "UICheckButtonTemplate")
-	Checkbox:SetPoint("CENTER",0,-145)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetPoint("CENTER",0,-190)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2417,12 +2686,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Frenzied Regeneration"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Frenzied Regeneration"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Druid:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Frenzied Regeneration")
@@ -2432,8 +2702,8 @@ function Rat.Options:ConfigFrame()
 	-- Lightwell
 	local Checkbox = CreateFrame("CheckButton", "Lightwell", self.Priest, "UICheckButtonTemplate")
 	Checkbox:SetPoint("CENTER",0,80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("LOW")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2451,12 +2721,13 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Lightwell"])
 	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
 	Icon:SetTexture(cdtbl["Lightwell"])
-	Icon:SetWidth(25)
-	Icon:SetHeight(25)
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
 	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
 	local text = self.Priest:CreateFontString(nil, "OVERLAY")
     text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
 	text:SetTextColor(1, 1, 1, 1)
 	text:SetShadowOffset(2,-2)
     text:SetText("Lightwell")
@@ -2464,32 +2735,31 @@ function Rat.Options:ConfigFrame()
 	-- icon
 	self.Icon = self:CreateTexture(nil, 'ARTWORK')
 	self.Icon:SetTexture("Interface\\AddOns\\Rat\\media\\icon.tga")
-	self.Icon:SetPoint('TOPLEFT', -1, 4)
-	self.Icon:SetWidth(50)
-	self.Icon:SetHeight(50)
+	self.Icon:SetPoint('TOPLEFT', 4, -2)
+	self.Icon:SetWidth(20)
+	self.Icon:SetHeight(20)
 
 	-- title text
-	local text = self.Background.Topmid:CreateFontString(nil, "OVERLAY")
-    text:SetPoint("CENTER", self, "CENTER", 0, 191)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 15)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
-    text:SetText("Raid Ability Tracker v"..Rat_Version)
+	local text = self:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("TOP", 0, -8)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 13)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Raid Ability Tracker v"..Rat_Version)
 
-	-- options text
-	local text = self.Background.Topmid:CreateFontString(nil, "OVERLAY")
-    text:SetPoint("CENTER", self, "CENTER", 0, 165)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 25)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
-    text:SetText("OPTIONS")
+	-- Header accent line
+	self.headerAccent = self:CreateTexture(nil, "OVERLAY")
+	self.headerAccent:SetHeight(1)
+	self.headerAccent:SetPoint("TOPLEFT", 4, -24)
+	self.headerAccent:SetPoint("TOPRIGHT", -4, -24)
+	self.headerAccent:SetTexture(unpack(C_ACCENT))
 
 	-- minimap option
 
 	local Checkbox = CreateFrame("CheckButton", "Minimap", self.Background.Tab2, "UICheckButtonTemplate")
 	Checkbox:SetPoint("TOPLEFT",70,-80)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("MEDIUM")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2507,9 +2777,9 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Minimap"])
 	local text = Checkbox:CreateFontString(nil, "OVERLAY")
     text:SetPoint("LEFT", 45, 0)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
     text:SetText("Show minimap icon")
 
 	-- notify option
@@ -2517,8 +2787,8 @@ function Rat.Options:ConfigFrame()
 	local Checkbox = CreateFrame("CheckButton", "Notify", self.Background.Tab2, "UICheckButtonTemplate")
 	Checkbox:SetParent(self.Background.Tab2)
 	Checkbox:SetPoint("TOPLEFT",70,-130)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("MEDIUM")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2536,9 +2806,9 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Notify"])
 	local text = Checkbox:CreateFontString(nil, "OVERLAY")
     text:SetPoint("LEFT", 45, 0)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
     text:SetText("Ability notification")
 
 	-- Invert abilities
@@ -2546,8 +2816,8 @@ function Rat.Options:ConfigFrame()
 	local Checkbox = CreateFrame("CheckButton", "Invert", self.Background.Tab2, "UICheckButtonTemplate")
 	Checkbox:SetParent(self.Background.Tab2)
 	Checkbox:SetPoint("TOPLEFT",70,-180)
-	Checkbox:SetWidth(35)
-	Checkbox:SetHeight(35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
 	Checkbox:SetFrameStrata("MEDIUM")
 	Checkbox:SetScript("OnClick", function ()
 		if Checkbox:GetChecked() == nil then
@@ -2565,10 +2835,173 @@ function Rat.Options:ConfigFrame()
 	Checkbox:SetChecked(Rat_Settings["Invert"])
 	local text = Checkbox:CreateFontString(nil, "OVERLAY")
     text:SetPoint("LEFT", 45, 0)
-    text:SetFont("Fonts\\FRIZQT__.TTF", 12)
-	text:SetTextColor(1, 1, 1, 1)
-	text:SetShadowOffset(2,-2)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
     text:SetText("Invert abilities")
+
+	-- Custom spells tab content (Tab3)
+
+	Rat.Options.CustomSelectedClass = "Any"
+	Rat.Options.CustomEntryFrames = {}
+	Rat.Options.CustomScrollOffset = 0
+
+	-- Class dropdown label
+	local text = self.Background.Tab3:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("TOPLEFT", 35, -8)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Class")
+
+	-- Class dropdown
+	self.CustomClassDropdown = CreateFrame("Button", "RatCustomClassDropdown", self.Background.Tab3, "UIDropDownMenuTemplate")
+	self.CustomClassDropdown:SetPoint("TOPLEFT", 10, -20)
+	UIDropDownMenu_Initialize(self.CustomClassDropdown, Rat.Options.CustomClassDrop)
+	UIDropDownMenu_SetSelectedID(self.CustomClassDropdown, 1)
+
+	-- Spell Name label
+	local text = self.Background.Tab3:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("TOPLEFT", 35, -55)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Spell Name")
+
+	-- Spell Name editbox
+	local editBd = {bgFile="Interface/Tooltips/UI-Tooltip-Background", edgeFile="Interface/Tooltips/UI-Tooltip-Border", edgeSize=4, insets={left=1,right=1,top=1,bottom=1}}
+	self.CustomNameBox = CreateFrame("EditBox", "RatCustomName", self.Background.Tab3)
+	self.CustomNameBox:SetWidth(200)
+	self.CustomNameBox:SetHeight(20)
+	self.CustomNameBox:SetPoint("TOPLEFT", 30, -70)
+	self.CustomNameBox:SetFontObject(ChatFontNormal)
+	self.CustomNameBox:SetAutoFocus(false)
+	self.CustomNameBox:SetBackdrop(editBd)
+	self.CustomNameBox:SetBackdropColor(unpack(C_COLUMN))
+	self.CustomNameBox:SetBackdropBorderColor(unpack(C_BORDER))
+	self.CustomNameBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+	self.CustomNameBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+
+	-- Spell ID label
+	local text = self.Background.Tab3:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("TOPLEFT", 35, -95)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Spell ID (optional)")
+
+	-- Spell ID editbox
+	self.CustomIdBox = CreateFrame("EditBox", "RatCustomId", self.Background.Tab3)
+	self.CustomIdBox:SetWidth(100)
+	self.CustomIdBox:SetHeight(20)
+	self.CustomIdBox:SetPoint("TOPLEFT", 30, -110)
+	self.CustomIdBox:SetFontObject(ChatFontNormal)
+	self.CustomIdBox:SetAutoFocus(false)
+	self.CustomIdBox:SetNumeric(true)
+	self.CustomIdBox:SetBackdrop(editBd)
+	self.CustomIdBox:SetBackdropColor(unpack(C_COLUMN))
+	self.CustomIdBox:SetBackdropBorderColor(unpack(C_BORDER))
+	self.CustomIdBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+	self.CustomIdBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+
+	-- Cooldown label
+	local text = self.Background.Tab3:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("TOPLEFT", 35, -135)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_TEXT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Cooldown (seconds)")
+
+	-- Cooldown editbox
+	self.CustomCdBox = CreateFrame("EditBox", "RatCustomCd", self.Background.Tab3)
+	self.CustomCdBox:SetWidth(100)
+	self.CustomCdBox:SetHeight(20)
+	self.CustomCdBox:SetPoint("TOPLEFT", 30, -150)
+	self.CustomCdBox:SetFontObject(ChatFontNormal)
+	self.CustomCdBox:SetAutoFocus(false)
+	self.CustomCdBox:SetNumeric(true)
+	self.CustomCdBox:SetBackdrop(editBd)
+	self.CustomCdBox:SetBackdropColor(unpack(C_COLUMN))
+	self.CustomCdBox:SetBackdropBorderColor(unpack(C_BORDER))
+	self.CustomCdBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+	self.CustomCdBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+
+	-- Add button
+	self.CustomAddBtn = CreateFrame("Button", nil, self.Background.Tab3, "UIPanelButtonTemplate")
+	self.CustomAddBtn:SetPoint("TOPLEFT", 30, -190)
+	self.CustomAddBtn:SetWidth(79)
+	self.CustomAddBtn:SetHeight(18)
+	self.CustomAddBtn:SetText("Add")
+	self.CustomAddBtn:SetScript("OnClick", function()
+		local name = self.CustomNameBox:GetText()
+		local idText = self.CustomIdBox:GetText()
+		local cdText = self.CustomCdBox:GetText()
+
+		if not name or name == "" then
+			DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat]|r Spell name is required.")
+			return
+		end
+		local cd = tonumber(cdText)
+		if not cd or cd <= 0 then
+			DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat]|r Cooldown must be a positive number.")
+			return
+		end
+
+		-- Check for duplicates
+		Rat_Settings["custom_spells"] = Rat_Settings["custom_spells"] or {}
+		for _, existing in ipairs(Rat_Settings["custom_spells"]) do
+			if existing.name == name then
+				DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat]|r Spell '"..name.."' already exists.")
+				return
+			end
+		end
+
+		local entry = {
+			name = name,
+			spellId = tonumber(idText),
+			cd = cd,
+			class = Rat.Options.CustomSelectedClass
+		}
+		table.insert(Rat_Settings["custom_spells"], entry)
+		Rat_LoadCustomSpells()
+		Rat:RefreshCustomList()
+		Rat:Update(true)
+
+		-- Clear inputs
+		self.CustomNameBox:SetText("")
+		self.CustomIdBox:SetText("")
+		self.CustomCdBox:SetText("")
+		DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A[Rat]|r Added custom spell: "..name)
+	end)
+
+	-- Separator line
+	local sep = self.Background.Tab3:CreateTexture(nil, "BORDER")
+	sep:SetWidth(950)
+	sep:SetHeight(1)
+	sep:SetPoint("TOPLEFT", 20, -220)
+	sep:SetTexture(C_ACCENT[1], C_ACCENT[2], C_ACCENT[3], 0.2)
+
+	-- Custom Spells list header
+	local text = self.Background.Tab3:CreateFontString(nil, "OVERLAY")
+	text:SetPoint("TOPLEFT", 30, -230)
+	text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	text:SetTextColor(unpack(C_ACCENT))
+	text:SetShadowOffset(1,-1)
+	text:SetText("Custom Spells")
+
+	-- Mousewheel scrolling for the custom spell list
+	self.Background.Tab3:EnableMouseWheel(1)
+	self.Background.Tab3:SetScript("OnMouseWheel", function()
+		if arg1 > 0 then
+			Rat.Options.CustomScrollOffset = Rat.Options.CustomScrollOffset - 1
+		else
+			Rat.Options.CustomScrollOffset = Rat.Options.CustomScrollOffset + 1
+		end
+		Rat:RefreshCustomList()
+	end)
+
+	-- Initial list population
+	Rat:RefreshCustomList()
 
 	-- create close button
 	self.CloseButton = CreateFrame("Button",nil,self,"UIPanelCloseButton")
@@ -2596,15 +3029,207 @@ function Rat.Options:ConfigFrame()
 	end)
 
 	-- done button
-	self.dbutton = CreateFrame("Button",nil,self,"UIPanelButtonTemplate")
+	self.dbutton = CreateFrame("Button",nil,self)
 	self.dbutton:SetPoint("BOTTOM",0,10)
 	self.dbutton:SetFrameStrata("MEDIUM")
-	self.dbutton:SetWidth(79)
-	self.dbutton:SetHeight(18)
-	self.dbutton:SetText("Done")
+	self.dbutton:SetWidth(80)
+	self.dbutton:SetHeight(24)
+	self.dbutton:SetBackdrop(panelBackdrop)
+	self.dbutton:SetBackdropColor(unpack(C_TAB_ON))
+	self.dbutton:SetBackdropBorderColor(unpack(C_BORDER))
+	self.dbutton.text = self.dbutton:CreateFontString(nil, "OVERLAY")
+	self.dbutton.text:SetPoint("CENTER", 0, 0)
+	self.dbutton.text:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	self.dbutton.text:SetTextColor(unpack(C_TEXT))
+	self.dbutton.text:SetShadowOffset(1, -1)
+	self.dbutton.text:SetText("Done")
 	self.dbutton:SetScript("OnClick", function() PlaySound("igMainMenuOptionCheckBoxOn"); Rat.Options:Hide() end)
+	self.dbutton:SetScript("OnEnter", function() self.dbutton:SetBackdropColor(unpack(C_TAB_HOVER)) end)
+	self.dbutton:SetScript("OnLeave", function() self.dbutton:SetBackdropColor(unpack(C_TAB_ON)) end)
 
 	self:Hide()
+end
+
+-- custom class dropdown init
+function Rat.Options:CustomClassDrop()
+	local classes = {"Any", "Warrior", "Paladin", "Hunter", "Rogue", "Priest", "Shaman", "Mage", "Warlock", "Druid"}
+	local info = {}
+	for i = 1, 10 do
+		info.text = classes[i]
+		info.value = i
+		info.func = function()
+			UIDropDownMenu_SetSelectedID(Rat.Options.CustomClassDropdown, this:GetID())
+			Rat.Options.CustomSelectedClass = classes[this:GetID()]
+		end
+		info.checked = nil
+		info.checkable = nil
+		UIDropDownMenu_AddButton(info, 1)
+	end
+end
+
+-- refresh custom spell list display
+function Rat:RefreshCustomList()
+	local entries = Rat_Settings["custom_spells"] or {}
+	local numEntries = 0
+	for _ in ipairs(entries) do numEntries = numEntries + 1 end
+
+	local maxVisible = 6
+	local startY = -245
+	local rowHeight = 30
+	local maxOffset = numEntries - maxVisible
+	if maxOffset < 0 then maxOffset = 0 end
+
+	-- Clamp scroll offset
+	if Rat.Options.CustomScrollOffset > maxOffset then
+		Rat.Options.CustomScrollOffset = maxOffset
+	end
+	if Rat.Options.CustomScrollOffset < 0 then
+		Rat.Options.CustomScrollOffset = 0
+	end
+
+	-- Hide all existing entry frames
+	for i = 1, 20 do
+		if Rat.Options.CustomEntryFrames[i] then
+			Rat.Options.CustomEntryFrames[i]:Hide()
+		end
+	end
+
+	-- Show visible entries
+	local visibleCount = 0
+	for idx = Rat.Options.CustomScrollOffset + 1, numEntries do
+		if visibleCount >= maxVisible then break end
+		visibleCount = visibleCount + 1
+		local entry = entries[idx]
+		local frame = Rat.Options.CustomEntryFrames[visibleCount]
+
+		if not frame then
+			frame = CreateFrame("Frame", nil, Rat.Options.Background.Tab3)
+			frame:SetWidth(950)
+			frame:SetHeight(28)
+
+			-- Checkbox
+			frame.cb = CreateFrame("CheckButton", "RatCustomCB"..visibleCount, frame, "UICheckButtonTemplate")
+			frame.cb:SetPoint("LEFT", 0, 0)
+			frame.cb:SetWidth(30)
+			frame.cb:SetHeight(30)
+			frame.cb:SetFrameStrata("MEDIUM")
+
+			-- Icon inside checkbox
+			frame.icon = frame.cb:CreateTexture(nil, "ARTWORK", 1)
+			frame.icon:SetWidth(20)
+			frame.icon:SetHeight(20)
+			frame.icon:SetPoint("CENTER", 0, 0)
+
+			-- Modern checkbox style
+			frame.cb:SetNormalTexture("")
+			frame.cb:SetPushedTexture("")
+			frame.cb:SetHighlightTexture("")
+			frame.cb:SetCheckedTexture("")
+			frame.check = frame.cb:CreateTexture(nil, "OVERLAY")
+			frame.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+			frame.check:SetWidth(20)
+			frame.check:SetHeight(20)
+			frame.check:SetPoint("BOTTOMRIGHT", 4, -4)
+
+			-- Name text
+			frame.nameText = frame:CreateFontString(nil, "OVERLAY")
+			frame.nameText:SetPoint("LEFT", frame.cb, "RIGHT", 5, 0)
+			frame.nameText:SetFont("Fonts\\FRIZQT__.TTF", 12)
+			frame.nameText:SetTextColor(1, 1, 1, 1)
+			frame.nameText:SetShadowOffset(2, -2)
+
+			-- CD text
+			frame.cdText = frame:CreateFontString(nil, "OVERLAY")
+			frame.cdText:SetPoint("LEFT", frame.nameText, "RIGHT", 10, 0)
+			frame.cdText:SetFont("Fonts\\FRIZQT__.TTF", 12)
+			frame.cdText:SetTextColor(0.7, 0.7, 0.7, 1)
+			frame.cdText:SetShadowOffset(2, -2)
+
+			-- Remove button
+			frame.removeBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+			frame.removeBtn:SetPoint("RIGHT", -10, 0)
+			frame.removeBtn:SetWidth(60)
+			frame.removeBtn:SetHeight(18)
+			frame.removeBtn:SetText("Remove")
+
+			Rat.Options.CustomEntryFrames[visibleCount] = frame
+		end
+
+		-- Update frame position
+		frame:ClearAllPoints()
+		frame:SetPoint("TOPLEFT", Rat.Options.Background.Tab3, "TOPLEFT", 30, startY - ((visibleCount - 1) * rowHeight))
+
+		-- Set checkbox state
+		local entryName = entry.name
+		frame.cb:SetChecked(Rat_Settings[entryName])
+		frame.cb:SetScript("OnClick", function()
+			if frame.cb:GetChecked() then
+				Rat_Settings[entryName] = 1
+				frame.icon:SetVertexColor(1, 1, 1)
+				frame.check:Show()
+			else
+				Rat_Settings[entryName] = nil
+				frame.icon:SetVertexColor(0.4, 0.4, 0.4)
+				frame.check:Hide()
+			end
+		end)
+
+		-- Set icon
+		local texture = cdtbl[entryName] or "Interface\\Icons\\INV_Misc_QuestionMark"
+		frame.icon:SetTexture(texture)
+
+		-- Set initial dim/bright state
+		if frame.cb:GetChecked() then
+			frame.icon:SetVertexColor(1, 1, 1)
+			frame.check:Show()
+		else
+			frame.icon:SetVertexColor(0.4, 0.4, 0.4)
+			frame.check:Hide()
+		end
+
+		-- Set name and cooldown text
+		frame.nameText:SetText(entryName)
+		local cdStr = entry.cd .. "s"
+		if entry.cd >= 3600 then
+			cdStr = string.format("%.1fh", entry.cd / 3600)
+		elseif entry.cd >= 60 then
+			cdStr = string.format("%.0fm", entry.cd / 60)
+		end
+		frame.cdText:SetText("(" .. cdStr .. ")")
+
+		-- Remove button handler
+		frame.removeBtn:SetScript("OnClick", function()
+			-- Find and remove entry by name
+			local spells = Rat_Settings["custom_spells"]
+			for j = 1, 100 do
+				if not spells[j] then break end
+				if spells[j].name == entryName then
+					table.remove(spells, j)
+					break
+				end
+			end
+			-- Clean up tables
+			L[entryName] = nil
+			RAT_COOLDOWN[entryName] = nil
+			Rat_Settings[entryName] = nil
+			-- Clean up active tracking
+			for playerName, abilities in pairs(RatTbl) do
+				if abilities[entryName] then
+					abilities[entryName] = nil
+					local tname = playerName .. "." .. entryName
+					if RatFrames[tname] then
+						RatFrames[tname]:Hide()
+						RatFrames[tname] = nil
+					end
+				end
+			end
+			Rat:RefreshCustomList()
+			Rat:Update(true)
+			DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A[Rat]|r Removed custom spell: " .. entryName)
+		end)
+
+		frame:Show()
+	end
 end
 
 -- dropdown functions
@@ -2911,7 +3536,7 @@ local function Rat_NormalizeAbilityName(localizedName)
     -- We want the EN key used as your canonical ability key.
     for en, loc in pairs(L) do
         if localizedName == en or localizedName == loc then
-            return en
+            return loc
         end
     end
     return localizedName -- fallback so it still appears, if you add it later
@@ -2929,23 +3554,23 @@ function getInvCd()
 					local name = Rat:hyperlink_name(GetContainerItemLink(rbag, rslot))
 					for k,v in pairs(L) do
 						if k == name then
-							if RatTbl[Rat_unit][k] == nil then RatTbl[Rat_unit][k] = { } end
+							if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
 							if duration > 2.5 then
 								local timeleft = duration-(GetTime()-s_time)
 								if (duration-math.floor(timeleft)) == 0 then
-
-									RatTbl[Rat_unit][k]["duration"] = timeleft+GetTime()
-									RatTbl[Rat_unit][k]["cd"] = duration
-									sendThrottle[k] = GetTime()
+									RatTbl[Rat_unit][v]["duration"] = timeleft+GetTime()
+									RatTbl[Rat_unit][v]["cd"] = duration
+									sendThrottle[v] = GetTime()
 								end
-								if sendThrottle[k] == nil or (GetTime() - sendThrottle[k]) > 10 then
-
-									RatTbl[Rat_unit][k]["duration"] = timeleft+GetTime()
-									RatTbl[Rat_unit][k]["cd"] = duration
-									sendThrottle[k] = GetTime()
+								if sendThrottle[v] == nil or (GetTime() - sendThrottle[v]) > 10 then
+									RatTbl[Rat_unit][v]["duration"] = timeleft+GetTime()
+									RatTbl[Rat_unit][v]["cd"] = duration
+									sendThrottle[v] = GetTime()
 								end
 							elseif duration == 0 then
-								RatTbl[Rat_unit][k]["duration"] = 0
+								if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
+									RatTbl[Rat_unit][v]["duration"] = 0
+								end
 							end
 						end
 					end
@@ -2956,62 +3581,85 @@ function getInvCd()
 end
 
 function getSpells()
-	local spellID = 1
-	local spell = GetSpellName(spellID, BOOKTYPE_SPELL)
-	local gcd = 0
 	if RatTbl[Rat_unit] == nil then RatTbl[Rat_unit] = { } end
-	while (spell) do
-		local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
-		if hasCooldown and duration > 3 then
-			gcd=gcd+1
-		end
-		spellID = spellID + 1
-		spell = GetSpellName(spellID, BOOKTYPE_SPELL)
-	end
 
-	if (gcd / spellID) > 0.5 then
-		gcd = true
-		--print("true")
-		else
-		gcd = false
-		--print("false")
-	end
-	spellID = 1
-	spell = GetSpellName(spellID, BOOKTYPE_SPELL)
-	while (spell) do
-		local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
-		for k,v in pairs(L) do
-			if k == spell and not gcd then
-				if RatTbl[Rat_unit][k] == nil then RatTbl[Rat_unit][k] = { } end
-				if hasCooldown == 1 and duration > 3 then
-					local timeleft = duration-(GetTime()-start)
-						RatTbl[Rat_unit][k]["duration"] = timeleft+GetTime()
-						RatTbl[Rat_unit][k]["cd"] = duration
+	if HAS_NAMPOWER then
+		-- Nampower path: GetSpellIdCooldown separates GCD from actual CD
+		for k, v in pairs(L) do
+			local spellId = GetSpellIdForName(k)
+			if spellId then
+				if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
+				local start, duration = GetSpellIdCooldown(spellId)
+				if start and duration and duration > 3 then
+					local timeleft = duration - (GetTime() - start)
+					RatTbl[Rat_unit][v]["duration"] = timeleft + GetTime()
+					RatTbl[Rat_unit][v]["cd"] = duration
+					RatTbl[Rat_unit][v]["spellId"] = spellId
 				else
-					RatTbl[Rat_unit][k]["duration"] = 0
+					if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
+						RatTbl[Rat_unit][v]["duration"] = 0
+					end
 				end
 			end
 		end
+	else
+		-- Fallback: original heuristic for GCD detection
+		local spellID = 1
+		local spell = GetSpellName(spellID, BOOKTYPE_SPELL)
+		local gcd = 0
+		local totalSpells = 0
+		while (spell) do
+			local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
+			totalSpells = totalSpells + 1
+			if hasCooldown and duration > 3 then
+				gcd = gcd + 1
+			end
+			spellID = spellID + 1
+			spell = GetSpellName(spellID, BOOKTYPE_SPELL)
+		end
 
-		spellID = spellID + 1
+		if totalSpells > 0 and (gcd / totalSpells) > 0.5 then
+			gcd = true
+		else
+			gcd = false
+		end
+
+		spellID = 1
 		spell = GetSpellName(spellID, BOOKTYPE_SPELL)
+		while (spell) do
+			local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
+			for k, v in pairs(L) do
+				if k == spell and not gcd then
+					if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
+					if hasCooldown == 1 and duration > 3 then
+						local timeleft = duration - (GetTime() - start)
+						RatTbl[Rat_unit][v]["duration"] = timeleft + GetTime()
+						RatTbl[Rat_unit][v]["cd"] = duration
+					else
+						if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
+							RatTbl[Rat_unit][v]["duration"] = 0
+						end
+					end
+				end
+			end
+			spellID = spellID + 1
+			spell = GetSpellName(spellID, BOOKTYPE_SPELL)
+		end
 	end
 end
 
 -- add an ability cooldown we got from a raidmember
 
-function Rat:AddCd(name,cdname,cd,duration)
-	local cdname = cdname
-	for k,v in pairs(L) do
-		if v == cdname then
-			cdname = k
-		end
-	end
+function Rat:AddCd(name, cdname, cd, duration, spellId)
+	if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r AddCd: name=" .. tostring(name) .. " ability=" .. tostring(cdname) .. " cd=" .. tostring(cd) .. " dur=" .. tostring(duration)) end
 	if RatTbl[name] == nil then RatTbl[name] = {} end
 	if RatTbl[name][cdname] == nil then RatTbl[name][cdname] = {} end
 	if duration > 3 then
-		RatTbl[name][cdname]["duration"] = duration+GetTime()
+		RatTbl[name][cdname]["duration"] = duration + GetTime()
 		RatTbl[name][cdname]["cd"] = cd
+		if spellId then
+			RatTbl[name][cdname]["spellId"] = spellId
+		end
 		Rat:Update()
 	end
 end
@@ -3036,7 +3684,7 @@ function Rat:Cleardb()
 			if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
 				for ability, dura in pairs(RatTbl[name]) do
 					local rframe = name.."."..ability
-					RatFrames[rframe]:Hide()
+					if RatFrames[rframe] then RatFrames[rframe]:Hide() end
 				end
 				RatTbl[name]=nil
 			end
@@ -3045,9 +3693,8 @@ function Rat:Cleardb()
 		for name,_ in pairs(RatTbl) do
 			if name ~= UnitName("player") then
 				for ability, dura in pairs(RatTbl[name]) do
-					-- fixed concatenation bug here
 					local rframe = name.."."..ability
-					RatFrames[rframe]:Hide()
+					if RatFrames[rframe] then RatFrames[rframe]:Hide() end
 				end
 				RatTbl[name]=nil
 			end
@@ -3076,26 +3723,220 @@ function Rat:HideVersionNameFrames()
 end
 
 function Rat:OnUnitCastEvent(casterGUID, targetGUID, eventType, spellID, castDur)
+    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r UNIT_CASTEVENT: type=" .. tostring(eventType) .. " spellID=" .. tostring(spellID) .. " guid=" .. tostring(casterGUID)) end
     if eventType ~= "CAST" and eventType ~= "CHANNEL" and eventType ~= "START" then
         return
     end
     local name = RAT_GUID_TO_NAME[casterGUID]
     if not name then
-        -- Rebuild once if unknown (late join or cache stale)
         Rat_BuildRaidGUIDIndex()
         name = RAT_GUID_TO_NAME[casterGUID]
-        if not name then return end
+        if not name then
+            if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat Debug]|r GUID not found: " .. tostring(casterGUID)) end
+            return
+        end
     end
 
-    local sName = SpellInfo(spellID)
-    if not sName then return end
+    local sName
+    if HAS_NAMPOWER then
+        sName = GetSpellNameAndRankForId(spellID)
+    else
+        sName = SpellInfo(spellID)
+    end
+    if not sName then
+        if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000[Rat Debug]|r No spell name for ID: " .. tostring(spellID)) end
+        return
+    end
 
     local key = Rat_NormalizeAbilityName(sName)
     local cd = RAT_COOLDOWN[key]
+    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r spell=" .. tostring(sName) .. " key=" .. tostring(key) .. " cd=" .. tostring(cd)) end
+
+    -- Dynamic CD from Nampower spell data
+    if HAS_NAMPOWER and spellID then
+        local rec = GetSpellRecField(spellID, "recoveryTime") or 0
+        local catRec = GetSpellRecField(spellID, "categoryRecoveryTime") or 0
+        local dynamicCd = math.max(rec, catRec) / 1000
+        if dynamicCd > 0 then cd = dynamicCd end
+    end
+
     if not cd or cd <= 0 then return end
 
-    -- Reuse your existing sink; this keeps UI/update logic untouched.
-    Rat:AddCd(name, key, cd, cd)
+    -- Dynamic icon from Nampower
+    if HAS_NAMPOWER and not cdtbl[key] then
+        local iconId = GetSpellRecField(spellID, "spellIconID")
+        if iconId then
+            local icon = GetSpellIconTexture(iconId)
+            if icon then cdtbl[key] = icon end
+        end
+    end
+
+    Rat:AddCd(name, key, cd, cd, spellID)
+
+    -- Broadcast to other Rat users
+    local throttleKey = name .. ":" .. key
+    if not sendThrottle[throttleKey] or (GetTime() - sendThrottle[throttleKey]) > 2 then
+        local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+        if channel then
+            SendAddonMessage("RAT_CD", name .. ":" .. key .. ":" .. cd .. ":" .. (spellID or 0), channel)
+            sendThrottle[throttleKey] = GetTime()
+        end
+    end
+end
+
+function Rat:OnSpellGoOther(itemId, spellId, casterGuid, targetGuid, castFlags, numHit, numMissed)
+    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r SPELL_GO_OTHER: spellId=" .. tostring(spellId) .. " guid=" .. tostring(casterGuid)) end
+    if not spellId or spellId == 0 then return end
+
+    local name = RAT_GUID_TO_NAME[casterGuid]
+    if not name then
+        Rat_BuildRaidGUIDIndex()
+        name = RAT_GUID_TO_NAME[casterGuid]
+        if not name then return end
+    end
+
+    local sName = GetSpellNameAndRankForId(spellId)
+    if not sName then return end
+
+    local key = Rat_NormalizeAbilityName(sName)
+
+    -- Dynamic CD from Nampower spell data
+    local rec = GetSpellRecField(spellId, "recoveryTime") or 0
+    local catRec = GetSpellRecField(spellId, "categoryRecoveryTime") or 0
+    local cd = math.max(rec, catRec) / 1000
+
+    -- Fall back to hardcoded table
+    if cd <= 0 then cd = RAT_COOLDOWN[key] end
+    if not cd or cd <= 0 then return end
+
+    -- Dynamic icon
+    if not cdtbl[key] then
+        local iconId = GetSpellRecField(spellId, "spellIconID")
+        if iconId then
+            local icon = GetSpellIconTexture(iconId)
+            if icon then cdtbl[key] = icon end
+        end
+    end
+
+    Rat:AddCd(name, key, cd, cd, spellId)
+
+    -- Broadcast to other Rat users
+    local throttleKey = name .. ":" .. key
+    if not sendThrottle[throttleKey] or (GetTime() - sendThrottle[throttleKey]) > 2 then
+        local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+        if channel then
+            SendAddonMessage("RAT_CD", name .. ":" .. key .. ":" .. cd .. ":" .. (spellId or 0), channel)
+            sendThrottle[throttleKey] = GetTime()
+        end
+    end
+end
+
+function Rat:OnSpellGoSelf(itemId, spellId, targetGuid, castFlags)
+    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r SPELL_GO_SELF: spellId=" .. tostring(spellId)) end
+    if not spellId or spellId == 0 then return end
+
+    local name = Rat_unit
+    if not name then name = UnitName("player") end
+
+    local sName = GetSpellNameAndRankForId(spellId)
+    if not sName then return end
+
+    local key = Rat_NormalizeAbilityName(sName)
+
+    -- Dynamic CD from Nampower spell data
+    local rec = GetSpellRecField(spellId, "recoveryTime") or 0
+    local catRec = GetSpellRecField(spellId, "categoryRecoveryTime") or 0
+    local cd = math.max(rec, catRec) / 1000
+
+    -- Fall back to hardcoded table
+    if cd <= 0 then cd = RAT_COOLDOWN[key] end
+    if not cd or cd <= 0 then return end
+
+    -- Dynamic icon
+    if not cdtbl[key] then
+        local iconId = GetSpellRecField(spellId, "spellIconID")
+        if iconId then
+            local icon = GetSpellIconTexture(iconId)
+            if icon then cdtbl[key] = icon end
+        end
+    end
+
+    Rat:AddCd(name, key, cd, cd, spellId)
+
+    -- Broadcast to other Rat users
+    local throttleKey = name .. ":" .. key
+    if not sendThrottle[throttleKey] or (GetTime() - sendThrottle[throttleKey]) > 2 then
+        local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+        if channel then
+            SendAddonMessage("RAT_CD", name .. ":" .. key .. ":" .. cd .. ":" .. (spellId or 0), channel)
+            sendThrottle[throttleKey] = GetTime()
+        end
+    end
+end
+
+function Rat:OnAddonMessage(prefix, message, channel, sender)
+    if sender == Rat_unit then return end -- ignore own messages
+
+    if prefix == "RAT_VER" then
+        RatVersionTbl[sender] = message
+        Rat.Version:Check()
+
+    elseif prefix == "RAT_CD" then
+        -- format: "casterName:abilityKey:cd:spellId"
+        local parts = {}
+        for part in string.gfind(message, "[^:]+") do
+            table.insert(parts, part)
+        end
+        if table.getn(parts) >= 3 then
+            local casterName = parts[1]
+            local abilityKey = parts[2]
+            local cd = tonumber(parts[3])
+            local spellId = tonumber(parts[4])
+            if casterName and abilityKey and cd and cd > 0 then
+                -- Only accept if we don't already have a newer entry
+                if not RatTbl[casterName] or not RatTbl[casterName][abilityKey]
+                   or not RatTbl[casterName][abilityKey]["duration"]
+                   or RatTbl[casterName][abilityKey]["duration"] < (cd + GetTime()) then
+                    Rat:AddCd(casterName, abilityKey, cd, cd, spellId)
+                end
+            end
+        end
+
+    elseif prefix == "BigWigs" then
+        -- BigWigs SpellRequests: BWSRCDRESP format
+        -- "BWSRCDRESP spellShort;requester;playerName;cdSeconds"
+        if string.sub(message, 1, 10) == "BWSRCDRESP" then
+            local payload = string.sub(message, 12)
+            local parts = {}
+            for part in string.gfind(payload, "[^;]+") do
+                table.insert(parts, part)
+            end
+            if table.getn(parts) >= 4 then
+                local spellShort = parts[1]
+                local playerName = parts[3]
+                local cdSeconds = tonumber(parts[4])
+                local abilityKey = RAT_BW_SPELL_MAP[spellShort]
+                if abilityKey and RAT_COOLDOWN[abilityKey] and playerName and cdSeconds and cdSeconds > 0 then
+                    local cd = RAT_COOLDOWN[abilityKey] or cdSeconds
+                    Rat:AddCd(playerName, abilityKey, cd, cdSeconds)
+                end
+            end
+        end
+
+        -- BigWigs CommonAuras: BWCAxx format
+        for syncToken, abilityKey in pairs(RAT_BW_AURA_MAP) do
+            if string.sub(message, 1, string.len(syncToken)) == syncToken then
+                local rest = string.sub(message, string.len(syncToken) + 1)
+                rest = string.gsub(rest, "^%s+", "")
+                local duration = tonumber(rest)
+                if duration and duration > 0 and RAT_COOLDOWN[abilityKey] then
+                    local cd = RAT_COOLDOWN[abilityKey] or duration
+                    Rat:AddCd(sender, abilityKey, cd, duration)
+                end
+                break
+            end
+        end
+    end
 end
 
 -- function to get classcolors from a player
@@ -3273,6 +4114,18 @@ function Rat:Update(force)
 		Rat.Options.version:Hide()
 	end
 		local i = 1
+		if Rat_Debug then
+			local dbgCount = 0
+			for n,_ in pairs(RatTbl) do
+				for a,_ in pairs(RatTbl[n]) do
+					if RatTbl[n][a]["cd"] then
+						dbgCount = dbgCount + 1
+						DEFAULT_CHAT_FRAME:AddMessage("|cFFFF00FF[Rat Debug]|r RatTbl: " .. n .. "/" .. a .. " cd=" .. tostring(RatTbl[n][a]["cd"]) .. " dur=" .. tostring(RatTbl[n][a]["duration"]) .. " remaining=" .. tostring(RatTbl[n][a]["duration"] and (RatTbl[n][a]["duration"] - GetTime())) .. " showClass=" .. tostring(Rat_Settings[Rat:GetClass(n)]) .. " showAbility=" .. tostring(Rat_Settings[a]) .. " showhide=" .. tostring(Rat_Settings["showhide"]))
+					end
+				end
+			end
+			if dbgCount == 0 then DEFAULT_CHAT_FRAME:AddMessage("|cFFFF00FF[Rat Debug]|r RatTbl is EMPTY (no active CDs)") end
+		end
 		Rat_sorted = sortDB(name)
 		for _, skey in ipairs(Rat_sorted) do
 			for name,_ in pairs(RatTbl) do
@@ -3281,6 +4134,13 @@ function Rat:Update(force)
 						-- fix: include the dot in the frame key
 						local tname = name.."."..ability
 						local texture = cdtbl[ability]
+						if not texture and HAS_NAMPOWER and RatTbl[name][ability]["spellId"] then
+							local iconId = GetSpellRecField(RatTbl[name][ability]["spellId"], "spellIconID")
+							if iconId then
+								texture = GetSpellIconTexture(iconId)
+								if texture then cdtbl[ability] = texture end
+							end
+						end
 						local bardecay = 1-((RatTbl[name][ability]["cd"]-(RatTbl[name][ability]["duration"]-GetTime())) / RatTbl[name][ability]["cd"])
 						local cdtime = rtime(RatTbl[name][ability]["duration"]-GetTime())
 						if bardecay > 1 then
@@ -3433,6 +4293,27 @@ function Rat.slash(arg1,arg2,arg3)
         if Rat.Update then Rat:Update(true) end
         DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r Cleared saved cooldowns for other players.")
 
+    elseif a1 == "debug" then
+        Rat_Debug = not Rat_Debug
+        if Rat_Debug then
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r Debug |cFF00FF00ON|r - cast a spell to see tracking info")
+            -- dump current state
+            local guidCount = 0
+            for _ in pairs(RAT_GUID_TO_NAME) do guidCount = guidCount + 1 end
+            DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r GUIDs indexed: " .. guidCount)
+            DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r Player: " .. tostring(Rat_unit))
+            local exists, guid = UnitExists("player")
+            DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r Player GUID: " .. tostring(guid) .. " in table: " .. tostring(RAT_GUID_TO_NAME[guid] or "NO"))
+            DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r HAS_NAMPOWER: " .. tostring(HAS_NAMPOWER))
+            -- dump custom spells
+            local customs = Rat_Settings and Rat_Settings["custom_spells"] or {}
+            for i, entry in ipairs(customs) do
+                DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r Custom[" .. i .. "]: " .. tostring(entry.name) .. " cd=" .. tostring(entry.cd) .. " inL=" .. tostring(L[entry.name] ~= nil) .. " inCD=" .. tostring(RAT_COOLDOWN[entry.name] ~= nil) .. " enabled=" .. tostring(Rat_Settings[entry.name]))
+            end
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r Debug |cFFFF0000OFF|r")
+        end
+
     else
         DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r unknown command",1,0.3,0.3);
     end
@@ -3473,7 +4354,9 @@ function sortDB()
 	local sortedKeys = { }
 	for k, v in pairs(RatTbl) do
 		for l, _ in pairs(RatTbl[k]) do
-		table.insert(sortedKeys, RatTbl[k][l]["duration"])
+			if RatTbl[k][l]["duration"] ~= nil then
+				table.insert(sortedKeys, RatTbl[k][l]["duration"])
+			end
 		end
 	end
 	table.sort(sortedKeys, function(a,b) return a>b end)
