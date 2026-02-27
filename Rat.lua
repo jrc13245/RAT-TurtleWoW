@@ -511,6 +511,15 @@ function Rat:OnEvent()
 			SendAddonMessage("RAT_VER", Rat_Version, channel)
 		end
 
+	-- added so leaving/joining party updates roster and resorts cooldowns
+	elseif (event == "PARTY_MEMBERS_CHANGED") then
+		Rat_BuildRaidGUIDIndex()
+		getSpells()
+		getInvCd()
+		Rat:Cleardb()
+		Rat:HideVersionNameFrames()
+		Rat:Update(true)
+
 	elseif (event == "SPELL_UPDATE_COOLDOWN") then
 		getSpells()
 		getInvCd()
@@ -3693,6 +3702,7 @@ function Rat:Cleardb()
 		for name,_ in pairs(RatTbl) do
 			if name ~= UnitName("player") then
 				for ability, dura in pairs(RatTbl[name]) do
+					-- fixed concatenation bug here
 					local rframe = name.."."..ability
 					if RatFrames[rframe] then RatFrames[rframe]:Hide() end
 				end
@@ -3701,6 +3711,7 @@ function Rat:Cleardb()
 		end
 	end
 end
+
 
 -- hides version frames for players not in raid anymore for our version check frame
 function Rat:HideVersionNameFrames()
