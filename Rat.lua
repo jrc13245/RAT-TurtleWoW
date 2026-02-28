@@ -53,6 +53,7 @@ Rat.Mainframe = CreateFrame("Frame","RMF",UIParent) -- Create Mainframe
 Rat.Options = CreateFrame("Frame","ROF",UIParent) -- Create Optionsframe
 Rat.Minimap = CreateFrame("Frame",nil,Minimap) -- Minimap Frame
 Rat.Version = CreateFrame("Frame","RVF",UIParent) -- Create Versionframe
+Rat.ReadyFrame = CreateFrame("Frame","RRF",UIParent) -- Create ReadyFrame
 Rat_Version = GetAddOnMetadata("Rat", "Version")
 
 -- Variables
@@ -96,6 +97,7 @@ if (GetLocale() == "deDE") then
         ["Hand der Abrechnung"] = "Hand of Reckoning",
         ["Erdbebenhieb"] = "Earthshaker Slam",
         ["Powerful Smelling Salts"] = "Powerful Smelling Salts", -- TODO: add German translation
+        ["Furchtschutzung"] = "Fear Ward", -- TODO: verify German translation
 	}
 elseif (GetLocale() == "frFR") then
 	L = {
@@ -128,6 +130,7 @@ elseif (GetLocale() == "frFR") then
         ["Main de justification"] = "Hand of Reckoning",
         ["Frappe du secoueur de terre"] = "Earthshaker Slam",
         ["Powerful Smelling Salts"] = "Powerful Smelling Salts", -- TODO: add French translation
+        ["Gardien de peur"] = "Fear Ward", -- TODO: verify French translation
 	}
 else -- Default to English
 	L = {
@@ -160,6 +163,7 @@ else -- Default to English
 		["Barkskin (Feral)"] = "Barkskin (Feral)",
         ["Earthshaker Slam"] = "Earthshaker Slam", -- Added
         ["Powerful Smelling Salts"] = "Powerful Smelling Salts",
+        ["Fear Ward"] = "Fear Ward",
 	}
 end
 
@@ -174,6 +178,7 @@ local RAT_COOLDOWN = {
   ["Taunt"]                   = 10,    -- 10s
   ["Tranquilizing Shot"]      = 20,    -- 20s
   ["Counterspell"]            = 30,    -- 30s
+  ["Fear Ward"]               = 30,    -- 30s
   ["Disarm"]                  = 60,    -- 1m
 
   -- Medium Cooldowns (1-10 minutes)
@@ -234,6 +239,8 @@ VersionFTbl = {}
 getThrottle = {}
 sendThrottle = {}
 RatFrames = {}
+RatReadyFrames = {}
+Rat_SeenSpells = {}
 Rat_Settings = Rat_Settings or {}
 
 cdtbl = {
@@ -262,6 +269,7 @@ cdtbl = {
 	["Counterspell"] = "Interface\\Icons\\Spell_Frost_IceShock",
 	["Earth Shock"] = "Interface\\Icons\\Spell_Nature_EarthShock",
 	["Lightwell"] = "Interface\\Icons\\Spell_Holy_SummonLightwell",
+	["Fear Ward"] = "Interface\\Icons\\Spell_Holy_Excorcism",
 	["Frenzied Regeneration"] = "Interface\\Icons\\Ability_BullRush",
 	["Spirit Link"] = "Interface\\Icons\\Spell_Shaman_SpiritLink",
 	["Barkskin (Feral)"] = "Interface\\Icons\\Spell_Nature_StoneClawTotem",
@@ -287,6 +295,35 @@ local RAT_BW_AURA_MAP = {
 	["BWCACR"] = "Challenging Roar",
 	["BWCASL"] = "Spirit Link",
 	["BWCADI"] = "Divine Intervention",
+}
+
+local RAT_CLASS_SPELLS = {
+	["Warrior"] = {"Shield Wall", "Challenging Shout", "Taunt", "Pummel", "Disarm"},
+	["Paladin"] = {"Lay on Hands", "Blessing of Protection", "Divine Shield", "Divine Intervention", "Hand of Reckoning"},
+	["Druid"]   = {"Innervate", "Rebirth", "Challenging Roar", "Growl", "Tranquility", "Barkskin (Feral)", "Frenzied Regeneration"},
+	["Shaman"]  = {"Reincarnation", "Earth Shock", "Earthshaker Slam"},
+	["Priest"]  = {"Lightwell", "Fear Ward"},
+	["Mage"]    = {"Counterspell"},
+	["Rogue"]   = {"Kick"},
+	["Hunter"]  = {"Tranquilizing Shot"},
+	["Warlock"] = {"Major Soulstone"},
+}
+
+local RAT_NONBASELINE = {
+	["Death Wish"] = true,
+	["Bulwark of the Righteous"] = true,
+	["Spirit Link"] = true,
+	["Powerful Smelling Salts"] = true,
+}
+
+-- Item ID → ability key for tracking item-use cooldowns (spellId == 0)
+local RAT_ITEM_MAP = {
+	[16896] = "Major Soulstone",
+}
+
+-- Spell ID → ability key fallback for item-triggered spells
+local RAT_SPELLID_MAP = {
+	[20765] = "Major Soulstone",
 }
 
 Rat_Font = {
@@ -463,8 +500,10 @@ function Rat:OnEvent()
 		DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /Rat options|r to show options menu",1,1,1)
 		DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /rat topbar hide|r to hide only the top bar",1,1,1)
 		DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /rat clear|r to clear saved cooldowns",1,1,1)
+		DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /rat ready|r to toggle ready spells list",1,1,1)
 		DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r hold |cFFFFFF00 'Alt'|r to move RAT",1,1,1)
 		Rat.Mainframe:ConfigFrame()
+		Rat.ReadyFrame:ConfigFrame()
 		RatDefault()
 		Rat.Options:ConfigFrame()
 		Rat.Version:ConfigFrame()
@@ -472,6 +511,34 @@ function Rat:OnEvent()
 		Rat_LoadCustomSpells()
 		getSpells()
 		getInvCd()
+
+		-- Detect non-baseline spells for local player (scan spellbook, not global DB)
+		if not Rat_SeenSpells[Rat_unit] then Rat_SeenSpells[Rat_unit] = {} end
+		for spell, _ in pairs(RAT_NONBASELINE) do
+			if spell == "Powerful Smelling Salts" then
+				for bag = 0, 4 do
+					for slot = 1, GetContainerNumSlots(bag) do
+						local link = GetContainerItemLink(bag, slot)
+						if link and string.find(link, "Powerful Smelling Salts") then
+							Rat_SeenSpells[Rat_unit][spell] = true
+						end
+					end
+				end
+			else
+				-- Scan the player's actual spellbook
+				local spellIdx = 1
+				local sName = GetSpellName(spellIdx, BOOKTYPE_SPELL)
+				while sName do
+					local normalized = L[sName] or sName
+					if normalized == spell then
+						Rat_SeenSpells[Rat_unit][spell] = true
+						break
+					end
+					spellIdx = spellIdx + 1
+					sName = GetSpellName(spellIdx, BOOKTYPE_SPELL)
+				end
+			end
+		end
 
 		Rat:Update(true)
 
@@ -482,6 +549,14 @@ function Rat:OnEvent()
 		local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
 		if channel then
 			SendAddonMessage("RAT_VER", Rat_Version, channel)
+			-- Request cooldown sync from other Rat users
+			SendAddonMessage("RAT_CDREQ", "", channel)
+			-- Request from BigWigs users (RAID only, BigWigs doesn't use PARTY)
+			if channel == "RAID" then
+				for bwSpell, _ in pairs(RAT_BW_SPELL_MAP) do
+					SendAddonMessage("BigWigs", "BWSRCDREQ " .. bwSpell .. ";" .. Rat_unit, "RAID")
+				end
+			end
 		end
 
 	elseif (event == "RAID_ROSTER_UPDATE") then
@@ -1139,6 +1214,122 @@ function Rat:SetTopBarVisible(show)
     else
         if mf.SetBackdrop then mf:SetBackdrop(nil) end
     end
+end
+
+-- ReadyFrame: shows spells that are available (not on cooldown)
+
+function Rat.ReadyFrame:ConfigFrame()
+	local rf = self
+	rf.options = {}
+	function rf.options:StartMoving()
+		this:StartMoving()
+		this.drag = true
+	end
+	function rf.options:StopMovingOrSizing()
+		this:StopMovingOrSizing()
+		this.drag = false
+	end
+
+	local backdrop = {
+		edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+		tile = "false",
+		tileSize = "8",
+		edgeSize = "8",
+		insets = { left = "2", right = "2", top = "2", bottom = "2" }
+	}
+	rf:SetFrameStrata("LOW")
+	rf:SetWidth(300)
+	rf:SetHeight(21)
+	rf:SetPoint("CENTER", 310, 0)
+	rf:SetMovable(1)
+	rf:EnableMouse(1)
+	rf:RegisterForDrag("LeftButton")
+	rf:SetBackdrop(backdrop)
+
+	rf:SetScript("OnDragStart", rf.options.StartMoving)
+	rf:SetScript("OnDragStop", rf.options.StopMovingOrSizing)
+	rf:SetScript("OnUpdate", function()
+		this:EnableMouse(IsAltKeyDown())
+		if not IsAltKeyDown() and this.drag then
+			rf.options:StopMovingOrSizing()
+		end
+	end)
+
+	rf.Background = {}
+	rf.Background.Top = CreateFrame("Frame", nil, rf)
+	rf.Background.Content = CreateFrame("Frame", nil, rf)
+
+	-- top background
+	local topBackdrop = {
+		bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+		edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+		tile = "false",
+		tileSize = "4",
+		edgeSize = "4",
+		insets = { left = "2", right = "2", top = "2", bottom = "2" }
+	}
+	rf.Background.Top:SetFrameStrata("BACKGROUND")
+	rf.Background.Top:SetWidth(rf:GetWidth() - 2)
+	rf.Background.Top:SetHeight(20)
+	rf.Background.Top:SetBackdrop(topBackdrop)
+	rf.Background.Top:SetBackdropColor(0, 0, 0, 1)
+	rf.Background.Top:SetPoint("TOPLEFT", rf, "TOPLEFT", 1, -1)
+
+	local topbg = rf.Background.Top:CreateTexture(nil, "ARTWORK", rf)
+	topbg:SetPoint("TOPLEFT", 1, -1)
+	topbg:SetWidth(rf:GetWidth() - 5)
+	topbg:SetHeight(17)
+	topbg:SetTexture(0.0, 0.6, 0.1)
+	topbg:SetGradientAlpha("Vertical", 1, 1, 1, 0.25, 1, 1, 1, 1)
+
+	rf.Background.Top.Title = rf.Background.Top:CreateFontString(nil, "ARTWORK")
+	rf.Background.Top.Title:SetPoint("LEFT", 5, 0)
+	rf.Background.Top.Title:SetFont("Fonts\\FRIZQT__.TTF", 11)
+	rf.Background.Top.Title:SetTextColor(255, 255, 255, 1)
+	rf.Background.Top.Title:SetShadowOffset(2, -2)
+	rf.Background.Top.Title:SetText("RAT - Ready")
+
+	-- content area
+	rf.Background.Content:SetFrameStrata("BACKGROUND")
+	rf.Background.Content:SetWidth(rf:GetWidth() - 2)
+	rf.Background.Content:SetHeight(1)
+	rf.Background.Content:SetBackdrop({
+		bgFile = "Interface/Tooltips/UI-Tooltip-Background",
+		edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
+		tile = "false",
+		tileSize = "4",
+		edgeSize = "4",
+		insets = { left = "2", right = "2", top = "2", bottom = "2" }
+	})
+	rf.Background.Content:SetBackdropColor(0, 0, 0, 0.8)
+	rf.Background.Content:SetPoint("TOPLEFT", rf, "TOPLEFT", 1, -21)
+
+	rf:Hide()
+end
+
+function Rat:CreateReadyRow(playerName)
+	local frame = CreateFrame("Button", "RatReady_" .. playerName, Rat.ReadyFrame.Background.Content)
+	frame:SetBackdrop({ bgFile = [[Interface/Tooltips/UI-Tooltip-Background]] })
+	frame:SetBackdropColor(0, 0, 0, 1)
+	frame:SetWidth(Rat.ReadyFrame:GetWidth() - 4)
+	frame:SetHeight(22)
+
+	frame.unitbg = frame:CreateTexture(nil, "ARTWORK")
+	frame.unitbg:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	frame.unitbg:SetWidth(60)
+	frame.unitbg:SetHeight(20)
+	frame.unitbg:SetPoint("TOPLEFT", 1, -1)
+	frame.unitbg:SetTexture("Interface/TargetingFrame/UI-StatusBar")
+
+	frame.unitname = frame:CreateFontString(nil, "ARTWORK")
+	frame.unitname:SetPoint("LEFT", frame.unitbg, "LEFT", 2, 0)
+	frame.unitname:SetFont("Fonts\\FRIZQT__.TTF", 10)
+	frame.unitname:SetTextColor(255, 255, 255, 1)
+	frame.unitname:SetShadowOffset(2, -2)
+	frame.unitname:SetText(playerName)
+
+	frame.icons = {}
+	return frame
 end
 
 function Rat.Options:ConfigFrame()
@@ -2741,6 +2932,39 @@ function Rat.Options:ConfigFrame()
 	text:SetShadowOffset(2,-2)
     text:SetText("Lightwell")
 
+	-- Fear Ward
+	local Checkbox = CreateFrame("CheckButton", "Fear Ward", self.Priest, "UICheckButtonTemplate")
+	Checkbox:SetPoint("CENTER",0,35)
+	Checkbox:SetWidth(30)
+	Checkbox:SetHeight(30)
+	Checkbox:SetFrameStrata("LOW")
+	Checkbox:SetScript("OnClick", function ()
+		if Checkbox:GetChecked() == nil then
+			Rat_Settings["Fear Ward"] = nil
+		elseif Checkbox:GetChecked() == 1 then
+			Rat_Settings["Fear Ward"] = 1
+		end
+		end)
+	Checkbox:SetScript("OnEnter", function()
+		GameTooltip:SetOwner(Checkbox, "ANCHOR_RIGHT");
+		GameTooltip:SetText("Turn on/off", 255, 255, 0, 1, 1);
+		GameTooltip:Show()
+	end)
+	Checkbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	Checkbox:SetChecked(Rat_Settings["Fear Ward"])
+	local Icon = Checkbox:CreateTexture(nil, 'ARTWORK',1)
+	Icon:SetTexture(cdtbl["Fear Ward"])
+	Icon:SetWidth(30)
+	Icon:SetHeight(30)
+	Icon:SetPoint("CENTER",0,0)
+	StyleCheckbox(Checkbox, Icon)
+	local text = self.Priest:CreateFontString(nil, "OVERLAY")
+    text:SetPoint("CENTER", Checkbox, "CENTER", 0, 25)
+    text:SetFont("Fonts\\FRIZQT__.TTF", 9)
+	text:SetTextColor(1, 1, 1, 1)
+	text:SetShadowOffset(2,-2)
+    text:SetText("Fear Ward")
+
 	-- icon
 	self.Icon = self:CreateTexture(nil, 'ARTWORK')
 	self.Icon:SetTexture("Interface\\AddOns\\Rat\\media\\icon.tga")
@@ -3661,6 +3885,10 @@ end
 
 function Rat:AddCd(name, cdname, cd, duration, spellId)
 	if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFF[Rat Debug]|r AddCd: name=" .. tostring(name) .. " ability=" .. tostring(cdname) .. " cd=" .. tostring(cd) .. " dur=" .. tostring(duration)) end
+	if RAT_NONBASELINE[cdname] then
+		if not Rat_SeenSpells[name] then Rat_SeenSpells[name] = {} end
+		Rat_SeenSpells[name][cdname] = true
+	end
 	if RatTbl[name] == nil then RatTbl[name] = {} end
 	if RatTbl[name][cdname] == nil then RatTbl[name][cdname] = {} end
 	if duration > 3 then
@@ -3796,7 +4024,33 @@ function Rat:OnUnitCastEvent(casterGUID, targetGUID, eventType, spellID, castDur
 end
 
 function Rat:OnSpellGoOther(itemId, spellId, casterGuid, targetGuid, castFlags, numHit, numMissed)
-    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r SPELL_GO_OTHER: spellId=" .. tostring(spellId) .. " guid=" .. tostring(casterGuid)) end
+    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r SPELL_GO_OTHER: spellId=" .. tostring(spellId) .. " itemId=" .. tostring(itemId) .. " guid=" .. tostring(casterGuid)) end
+
+    -- Handle item uses (spellId == 0)
+    if (not spellId or spellId == 0) and itemId and RAT_ITEM_MAP[itemId] then
+        local name = RAT_GUID_TO_NAME[casterGuid]
+        if not name then
+            Rat_BuildRaidGUIDIndex()
+            name = RAT_GUID_TO_NAME[casterGuid]
+        end
+        if name then
+            local key = RAT_ITEM_MAP[itemId]
+            local cd = RAT_COOLDOWN[key]
+            if cd and cd > 0 then
+                Rat:AddCd(name, key, cd, cd)
+                local throttleKey = name .. ":" .. key
+                if not sendThrottle[throttleKey] or (GetTime() - sendThrottle[throttleKey]) > 2 then
+                    local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+                    if channel then
+                        SendAddonMessage("RAT_CD", name .. ":" .. key .. ":" .. cd .. ":0", channel)
+                        sendThrottle[throttleKey] = GetTime()
+                    end
+                end
+            end
+        end
+        return
+    end
+
     if not spellId or spellId == 0 then return end
 
     local name = RAT_GUID_TO_NAME[casterGuid]
@@ -3810,6 +4064,11 @@ function Rat:OnSpellGoOther(itemId, spellId, casterGuid, targetGuid, castFlags, 
     if not sName then return end
 
     local key = Rat_NormalizeAbilityName(sName)
+
+    -- Spell ID fallback for item-triggered spells
+    if not RAT_COOLDOWN[key] and RAT_SPELLID_MAP[spellId] then
+        key = RAT_SPELLID_MAP[spellId]
+    end
 
     -- Dynamic CD from Nampower spell data
     local rec = GetSpellRecField(spellId, "recoveryTime") or 0
@@ -3843,7 +4102,28 @@ function Rat:OnSpellGoOther(itemId, spellId, casterGuid, targetGuid, castFlags, 
 end
 
 function Rat:OnSpellGoSelf(itemId, spellId, targetGuid, castFlags)
-    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r SPELL_GO_SELF: spellId=" .. tostring(spellId)) end
+    if Rat_Debug then DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00[Rat Debug]|r SPELL_GO_SELF: spellId=" .. tostring(spellId) .. " itemId=" .. tostring(itemId)) end
+
+    -- Handle item uses (spellId == 0)
+    if (not spellId or spellId == 0) and itemId and RAT_ITEM_MAP[itemId] then
+        local name = Rat_unit
+        if not name then name = UnitName("player") end
+        local key = RAT_ITEM_MAP[itemId]
+        local cd = RAT_COOLDOWN[key]
+        if cd and cd > 0 then
+            Rat:AddCd(name, key, cd, cd)
+            local throttleKey = name .. ":" .. key
+            if not sendThrottle[throttleKey] or (GetTime() - sendThrottle[throttleKey]) > 2 then
+                local channel = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+                if channel then
+                    SendAddonMessage("RAT_CD", name .. ":" .. key .. ":" .. cd .. ":0", channel)
+                    sendThrottle[throttleKey] = GetTime()
+                end
+            end
+        end
+        return
+    end
+
     if not spellId or spellId == 0 then return end
 
     local name = Rat_unit
@@ -3853,6 +4133,11 @@ function Rat:OnSpellGoSelf(itemId, spellId, targetGuid, castFlags)
     if not sName then return end
 
     local key = Rat_NormalizeAbilityName(sName)
+
+    -- Spell ID fallback for item-triggered spells
+    if not RAT_COOLDOWN[key] and RAT_SPELLID_MAP[spellId] then
+        key = RAT_SPELLID_MAP[spellId]
+    end
 
     -- Dynamic CD from Nampower spell data
     local rec = GetSpellRecField(spellId, "recoveryTime") or 0
@@ -3945,6 +4230,52 @@ function Rat:OnAddonMessage(prefix, message, channel, sender)
                     Rat:AddCd(sender, abilityKey, cd, duration)
                 end
                 break
+            end
+        end
+
+    elseif prefix == "RAT_CDREQ" then
+        -- Someone reloaded and wants our cooldown data
+        if not sendThrottle["cdsync_resp"] or (GetTime() - sendThrottle["cdsync_resp"]) > 10 then
+            sendThrottle["cdsync_resp"] = GetTime()
+            local ch = (GetNumRaidMembers() > 0 and "RAID") or (GetNumPartyMembers() > 0 and "PARTY") or nil
+            if ch then
+                for name, abilities in pairs(RatTbl) do
+                    for ability, data in pairs(abilities) do
+                        if data["duration"] and data["cd"] then
+                            local remaining = data["duration"] - GetTime()
+                            if remaining > 3 then
+                                local msg = name .. ":" .. ability .. ":" .. string.format("%.1f", remaining) .. ":" .. tostring(data["cd"])
+                                if data["spellId"] then
+                                    msg = msg .. ":" .. tostring(data["spellId"])
+                                end
+                                SendAddonMessage("RAT_CDRSP", msg, ch)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+    elseif prefix == "RAT_CDRSP" then
+        -- Cooldown sync response: "name:ability:remaining:totalCd[:spellId]"
+        local parts = {}
+        for part in string.gfind(message, "[^:]+") do
+            table.insert(parts, part)
+        end
+        if table.getn(parts) >= 4 then
+            local casterName = parts[1]
+            local abilityKey = parts[2]
+            local remaining = tonumber(parts[3])
+            local totalCd = tonumber(parts[4])
+            local spellId = tonumber(parts[5])
+            if casterName and abilityKey and remaining and remaining > 0 and totalCd and totalCd > 0 then
+                local newExpiry = remaining + GetTime()
+                -- Only accept if we don't already have a newer entry
+                if not RatTbl[casterName] or not RatTbl[casterName][abilityKey]
+                   or not RatTbl[casterName][abilityKey]["duration"]
+                   or RatTbl[casterName][abilityKey]["duration"] < newExpiry then
+                    Rat:AddCd(casterName, abilityKey, totalCd, remaining, spellId)
+                end
             end
         end
     end
@@ -4225,6 +4556,140 @@ function Rat:Update(force)
 			Rat.Mainframe:SetHeight(22+(22*1))
 			Rat.Mainframe.Background.Tab1:SetHeight(Rat.Mainframe:GetHeight()-16)
 		end
+
+		-- Ready list update
+		if Rat_Settings["ReadyList"] ~= 1 then
+			if Rat.ReadyFrame:IsVisible() then Rat.ReadyFrame:Hide() end
+		else
+			Rat.ReadyFrame:Show()
+			-- Enumerate group members
+			local readyMembers = {}
+			if GetRaidRosterInfo(1) then
+				for ri = 1, GetNumRaidMembers() do
+					local rname = UnitName("raid" .. ri)
+					if rname then table.insert(readyMembers, rname) end
+				end
+			else
+				for pi = 1, GetNumPartyMembers() do
+					local pname = UnitName("party" .. pi)
+					if pname then table.insert(readyMembers, pname) end
+				end
+				local pname = UnitName("player")
+				if pname then table.insert(readyMembers, pname) end
+			end
+
+			-- Track which ready row frames are used this pass
+			local usedRows = {}
+			local rowIndex = 0
+
+			for _, memberName in ipairs(readyMembers) do
+				local class = Rat:GetClass(memberName)
+				if class and Rat_Settings[class] == 1 then
+					local spells = RAT_CLASS_SPELLS[class]
+					if spells then
+						local readyIcons = {}
+						for _, spell in ipairs(spells) do
+							if Rat_Settings[spell] == 1 then
+								local isOnCooldown = false
+								if RatTbl[memberName] and RatTbl[memberName][spell]
+								   and RatTbl[memberName][spell]["duration"]
+								   and RatTbl[memberName][spell]["duration"] - GetTime() > 0 then
+									isOnCooldown = true
+								end
+								if not isOnCooldown then
+									-- For non-baseline spells, require evidence
+									if RAT_NONBASELINE[spell] then
+										if Rat_SeenSpells[memberName] and Rat_SeenSpells[memberName][spell] then
+											table.insert(readyIcons, spell)
+										end
+									else
+										table.insert(readyIcons, spell)
+									end
+								end
+							end
+						end
+						-- Also check non-baseline spells not in class list (e.g. Death Wish for Warrior)
+						for nbSpell, _ in pairs(RAT_NONBASELINE) do
+							if Rat_SeenSpells[memberName] and Rat_SeenSpells[memberName][nbSpell] then
+								-- Check it's not already in spells list
+								local alreadyListed = false
+								if spells then
+									for _, s in ipairs(spells) do
+										if s == nbSpell then alreadyListed = true end
+									end
+								end
+								if not alreadyListed and Rat_Settings[nbSpell] == 1 then
+									local isOnCooldown = false
+									if RatTbl[memberName] and RatTbl[memberName][nbSpell]
+									   and RatTbl[memberName][nbSpell]["duration"]
+									   and RatTbl[memberName][nbSpell]["duration"] - GetTime() > 0 then
+										isOnCooldown = true
+									end
+									if not isOnCooldown then
+										table.insert(readyIcons, nbSpell)
+									end
+								end
+							end
+						end
+
+						if table.getn(readyIcons) > 0 then
+							-- Create or reuse row frame
+							if not RatReadyFrames[memberName] then
+								RatReadyFrames[memberName] = Rat:CreateReadyRow(memberName)
+							end
+							local row = RatReadyFrames[memberName]
+							row:ClearAllPoints()
+							row:SetPoint("TOPLEFT", 2, (-22 * rowIndex))
+							row:SetWidth(Rat.ReadyFrame:GetWidth() - 4)
+
+							-- Set class color
+							row.unitbg:SetTexture(Rat:GetClassColors(memberName))
+							row.unitbg:SetGradientAlpha("Vertical", 1, 1, 1, 0, 1, 1, 1, 1)
+							row.unitname:SetText(memberName)
+
+							-- Set icons
+							for iconIdx, iconSpell in ipairs(readyIcons) do
+								if not row.icons[iconIdx] then
+									row.icons[iconIdx] = row:CreateTexture(nil, "OVERLAY")
+									row.icons[iconIdx]:SetWidth(20)
+									row.icons[iconIdx]:SetHeight(20)
+								end
+								local tex = row.icons[iconIdx]
+								tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+								tex:ClearAllPoints()
+								tex:SetPoint("TOPLEFT", 62 + (21 * (iconIdx - 1)), -1)
+								tex:SetTexture(cdtbl[iconSpell])
+								tex:Show()
+							end
+							-- Hide unused icons
+							for hideIdx = table.getn(readyIcons) + 1, table.getn(row.icons) do
+								if row.icons[hideIdx] then row.icons[hideIdx]:Hide() end
+							end
+
+							row:Show()
+							usedRows[memberName] = true
+							rowIndex = rowIndex + 1
+						end
+					end
+				end
+			end
+
+			-- Hide rows for players not in current display
+			for rname, rframe in pairs(RatReadyFrames) do
+				if not usedRows[rname] then
+					rframe:Hide()
+				end
+			end
+
+			-- Resize ReadyFrame
+			if rowIndex > 0 then
+				Rat.ReadyFrame:SetHeight(21 + (22 * rowIndex))
+				Rat.ReadyFrame.Background.Content:SetHeight(22 * rowIndex)
+			else
+				Rat.ReadyFrame:SetHeight(21)
+				Rat.ReadyFrame.Background.Content:SetHeight(1)
+			end
+		end
 	end
 end
 
@@ -4257,6 +4722,7 @@ function Rat.slash(arg1,arg2,arg3)
         DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /Rat options|r to show options menu",1,1,1)
         DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /rat topbar hide|r to hide only the top bar",1,1,1)
         DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /rat clear|r to clear saved cooldowns",1,1,1)
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r type |cFFFFFF00 /rat ready|r to toggle ready spells list",1,1,1)
         return
     end
 
@@ -4324,6 +4790,18 @@ function Rat.slash(arg1,arg2,arg3)
         else
             DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r Debug |cFFFF0000OFF|r")
         end
+
+    elseif a1 == "ready" then
+        if Rat_Settings["ReadyList"] == 1 then
+            Rat_Settings["ReadyList"] = 0
+            if Rat.ReadyFrame then Rat.ReadyFrame:Hide() end
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r Ready list |cFFFF0000OFF|r")
+        else
+            Rat_Settings["ReadyList"] = 1
+            if Rat.ReadyFrame then Rat.ReadyFrame:Show() end
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r Ready list |cFF00FF00ON|r")
+        end
+        if Rat.Update then Rat:Update(true) end
 
     else
         DEFAULT_CHAT_FRAME:AddMessage("|cFFF5F54A Rat:|r unknown command",1,0.3,0.3);
