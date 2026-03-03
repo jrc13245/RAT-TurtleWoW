@@ -12,20 +12,26 @@ end
 
 local RAT_GUID_TO_NAME = {}
 local RAT_NAME_TO_GUID = {}
+local RAT_NAME_TO_CLASS = {}
+
+-- Reverse lookup: English value → localized key (for O(1) normalize)
+local L_REVERSE = {}
 
 local function Rat_BuildRaidGUIDIndex()
 	for k in pairs(RAT_GUID_TO_NAME) do RAT_GUID_TO_NAME[k] = nil end
 	for k in pairs(RAT_NAME_TO_GUID) do RAT_NAME_TO_GUID[k] = nil end
+	for k in pairs(RAT_NAME_TO_CLASS) do RAT_NAME_TO_CLASS[k] = nil end
 
     if GetNumRaidMembers and GetNumRaidMembers() > 0 then
         for i=1, GetNumRaidMembers() do
             local unit = "raid"..i
             local name = UnitName(unit)
-            -- SuperWoW: UnitExists also returns GUID
             local exists, guid = UnitExists(unit)
             if exists and name and guid then
                 RAT_GUID_TO_NAME[guid] = name
                 RAT_NAME_TO_GUID[name] = guid
+                local class = UnitClass(unit)
+                if class then RAT_NAME_TO_CLASS[name] = class end
             end
         end
     elseif GetNumPartyMembers and GetNumPartyMembers() > 0 then
@@ -36,6 +42,8 @@ local function Rat_BuildRaidGUIDIndex()
             if exists and name and guid then
                 RAT_GUID_TO_NAME[guid] = name
                 RAT_NAME_TO_GUID[name] = guid
+                local class = UnitClass(unit)
+                if class then RAT_NAME_TO_CLASS[name] = class end
             end
         end
     end
@@ -46,6 +54,8 @@ local function Rat_BuildRaidGUIDIndex()
         RAT_GUID_TO_NAME[guid] = name
         RAT_NAME_TO_GUID[name] = guid
     end
+    local playerClass = UnitClass("player")
+    if name and playerClass then RAT_NAME_TO_CLASS[name] = playerClass end
 end
 
 Rat = CreateFrame("Button", "Rat", UIParent); -- Create first frame
@@ -62,6 +72,9 @@ RAT_CP_OBJ=nil
 RAT_CP_TYPE=nil
 Rat_unit = UnitName("player")
 Rat_Debug = false
+local Rat_dirty = true
+local Rat_spellCdThrottle = 0
+local Rat_bagCdThrottle = 0
 
 -- loacalization
 local L = {}
@@ -167,6 +180,16 @@ else -- Default to English
 	}
 end
 
+-- Build L_REVERSE: maps English value → localized key for O(1) normalize
+local function Rat_BuildLReverse()
+	for k in pairs(L_REVERSE) do L_REVERSE[k] = nil end
+	for localizedName, englishName in pairs(L) do
+		L_REVERSE[englishName] = localizedName
+		L_REVERSE[localizedName] = localizedName  -- localized key maps to itself
+	end
+end
+Rat_BuildLReverse()
+
 local RAT_COOLDOWN = {
   -- Short Cooldowns (< 1 minute)
   ["Earth Shock"]             = 6,     -- 6s
@@ -229,6 +252,7 @@ function Rat_LoadCustomSpells()
 			end
 		end
 	end
+	Rat_BuildLReverse()
 end
 
 -- Tables
@@ -485,7 +509,6 @@ Rat:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 Rat:RegisterEvent("BAG_UPDATE_COOLDOWN")
 Rat:RegisterEvent("UNIT_CASTEVENT")
 Rat:RegisterEvent("CHAT_MSG_ADDON")
-Rat:RegisterEvent("RAW_COMBATLOG")
 if HAS_NAMPOWER then
 	Rat:RegisterEvent("SPELL_GO_OTHER")
 	Rat:RegisterEvent("SPELL_GO_SELF")
@@ -586,25 +609,22 @@ function Rat:OnEvent()
 			SendAddonMessage("RAT_VER", Rat_Version, channel)
 		end
 
-	-- added so leaving/joining party updates roster and resorts cooldowns
-	elseif (event == "PARTY_MEMBERS_CHANGED") then
-		Rat_BuildRaidGUIDIndex()
-		getSpells()
-		getInvCd()
-		Rat:Cleardb()
-		Rat:HideVersionNameFrames()
-		Rat:Update(true)
-
 	elseif (event == "SPELL_UPDATE_COOLDOWN") then
-		getSpells()
-		getInvCd()
-		Rat:Cleardb()
-
-		Rat:Update()
+		local now = GetTime()
+		if now - Rat_spellCdThrottle >= 0.5 then
+			Rat_spellCdThrottle = now
+			getSpells()
+			getInvCd()
+			Rat:Cleardb()
+			Rat_dirty = true
+		end
 	elseif (event == "BAG_UPDATE_COOLDOWN") then
-		getInvCd()
-
-		Rat:Update()
+		local now = GetTime()
+		if now - Rat_bagCdThrottle >= 0.5 then
+			Rat_bagCdThrottle = now
+			getInvCd()
+			Rat_dirty = true
+		end
 	elseif (event == "UNIT_CASTEVENT") then
 		Rat:OnUnitCastEvent(arg1, arg2, arg3, arg4, arg5) -- casterGUID, targetGUID, eventType, spellID, castDuration
 	elseif (event == "SPELL_GO_OTHER") then
@@ -3765,12 +3785,10 @@ function Rat:msg(text)
 end
 
 local function Rat_NormalizeAbilityName(localizedName)
-    -- L has entries like ["Innervate"] = "Innervate" (or localized→English).
-    -- We want the EN key used as your canonical ability key.
-    for en, loc in pairs(L) do
-        if localizedName == en or localizedName == loc then
-            return loc
-        end
+    -- O(1) lookup via L_REVERSE: localized/English name → English value
+    local key = L_REVERSE[localizedName]
+    if key then
+        return L[key]
     end
     return localizedName -- fallback so it still appears, if you add it later
 end
@@ -3784,26 +3802,25 @@ function getInvCd()
             for rslot = 1, GetContainerNumSlots(rbag) do
 				local s_time, duration, enabled = GetContainerItemCooldown(rbag, rslot)
 				if enabled == 1 then
-					local name = Rat:hyperlink_name(GetContainerItemLink(rbag, rslot))
-					for k,v in pairs(L) do
-						if k == name then
-							if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
-							if duration > 2.5 then
-								local timeleft = duration-(GetTime()-s_time)
-								if (duration-math.floor(timeleft)) == 0 then
-									RatTbl[Rat_unit][v]["duration"] = timeleft+GetTime()
-									RatTbl[Rat_unit][v]["cd"] = duration
-									sendThrottle[v] = GetTime()
-								end
-								if sendThrottle[v] == nil or (GetTime() - sendThrottle[v]) > 10 then
-									RatTbl[Rat_unit][v]["duration"] = timeleft+GetTime()
-									RatTbl[Rat_unit][v]["cd"] = duration
-									sendThrottle[v] = GetTime()
-								end
-							elseif duration == 0 then
-								if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
-									RatTbl[Rat_unit][v]["duration"] = 0
-								end
+					local itemName = Rat:hyperlink_name(GetContainerItemLink(rbag, rslot))
+					local v = itemName and L[itemName]
+					if v then
+						if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
+						if duration > 2.5 then
+							local timeleft = duration-(GetTime()-s_time)
+							if (duration-math.floor(timeleft)) == 0 then
+								RatTbl[Rat_unit][v]["duration"] = timeleft+GetTime()
+								RatTbl[Rat_unit][v]["cd"] = duration
+								sendThrottle[v] = GetTime()
+							end
+							if sendThrottle[v] == nil or (GetTime() - sendThrottle[v]) > 10 then
+								RatTbl[Rat_unit][v]["duration"] = timeleft+GetTime()
+								RatTbl[Rat_unit][v]["cd"] = duration
+								sendThrottle[v] = GetTime()
+							end
+						elseif duration == 0 then
+							if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
+								RatTbl[Rat_unit][v]["duration"] = 0
 							end
 						end
 					end
@@ -3860,18 +3877,17 @@ function getSpells()
 		spellID = 1
 		spell = GetSpellName(spellID, BOOKTYPE_SPELL)
 		while (spell) do
-			local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
-			for k, v in pairs(L) do
-				if k == spell and not gcd then
-					if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
-					if hasCooldown == 1 and duration > 3 then
-						local timeleft = duration - (GetTime() - start)
-						RatTbl[Rat_unit][v]["duration"] = timeleft + GetTime()
-						RatTbl[Rat_unit][v]["cd"] = duration
-					else
-						if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
-							RatTbl[Rat_unit][v]["duration"] = 0
-						end
+			local v = L[spell]
+			if v and not gcd then
+				local start, duration, hasCooldown = GetSpellCooldown(spellID, BOOKTYPE_SPELL)
+				if RatTbl[Rat_unit][v] == nil then RatTbl[Rat_unit][v] = { } end
+				if hasCooldown == 1 and duration > 3 then
+					local timeleft = duration - (GetTime() - start)
+					RatTbl[Rat_unit][v]["duration"] = timeleft + GetTime()
+					RatTbl[Rat_unit][v]["cd"] = duration
+				else
+					if not RatTbl[Rat_unit][v]["duration"] or RatTbl[Rat_unit][v]["duration"] <= GetTime() then
+						RatTbl[Rat_unit][v]["duration"] = 0
 					end
 				end
 			end
@@ -3897,29 +3913,23 @@ function Rat:AddCd(name, cdname, cd, duration, spellId)
 		if spellId then
 			RatTbl[name][cdname]["spellId"] = spellId
 		end
-		Rat:Update()
+		Rat_dirty = true
 	end
 end
 
 -- function to check if a player is still in raid
 
+-- O(1) raid check using cached name→guid table
 function Rat:InRaidCheck(name)
-	if GetRaidRosterInfo(1) then
-		for i=1,GetNumRaidMembers() do
-			if name == UnitName("raid"..i) then
-				return true
-			end
-		end
-		return false
-	end
+	return RAT_NAME_TO_GUID[name] ~= nil
 end
 
 -- SAFER: clear bars/entries for people no longer in raid
 function Rat:Cleardb()
 	if GetRaidRosterInfo(1) then
 		for name,_ in pairs(RatTbl) do
-			if name ~= UnitName("player") and not Rat:InRaidCheck(name) then
-				for ability, dura in pairs(RatTbl[name]) do
+			if name ~= UnitName("player") and not RAT_NAME_TO_GUID[name] then
+				for ability, _ in pairs(RatTbl[name]) do
 					local rframe = name.."."..ability
 					if RatFrames[rframe] then RatFrames[rframe]:Hide() end
 				end
@@ -3929,8 +3939,7 @@ function Rat:Cleardb()
 	else
 		for name,_ in pairs(RatTbl) do
 			if name ~= UnitName("player") then
-				for ability, dura in pairs(RatTbl[name]) do
-					-- fixed concatenation bug here
+				for ability, _ in pairs(RatTbl[name]) do
 					local rframe = name.."."..ability
 					if RatFrames[rframe] then RatFrames[rframe]:Hide() end
 				end
@@ -4281,116 +4290,51 @@ function Rat:OnAddonMessage(prefix, message, channel, sender)
     end
 end
 
--- function to get classcolors from a player
+-- class color RGBA lookup table
+local RAT_CLASS_COLORS_RGBA = {
+	["Warrior"] = { 0.78, 0.61, 0.43, 1 },
+	["Hunter"]  = { 0.67, 0.83, 0.45 },
+	["Mage"]    = { 0.41, 0.80, 0.94 },
+	["Rogue"]   = { 1.00, 0.96, 0.41 },
+	["Warlock"] = { 0.58, 0.51, 0.79, 1 },
+	["Druid"]   = { 1, 0.49, 0.04, 1 },
+	["Shaman"]  = { 0.0, 0.44, 0.87 },
+	["Priest"]  = { 1.00, 1.00, 1.00 },
+	["Paladin"] = { 0.96, 0.55, 0.73 },
+}
+local RAT_CLASS_COLORS_HEX = {
+	["Warrior"] = "|cffC79C6E",
+	["Hunter"]  = "|cffABD473",
+	["Mage"]    = "|cff69CCF0",
+	["Rogue"]   = "|cffFFF569",
+	["Warlock"] = "|cff9482C9",
+	["Druid"]   = "|cffFF7D0A",
+	["Shaman"]  = "|cff0070DE",
+	["Priest"]  = "|cffFFFFFF",
+	["Paladin"] = "|cffF58CBA",
+}
+
+-- function to get classcolors from a player (cached O(1))
 
 function Rat:GetClassColors(name)
-	if name == UnitName("player") then
-		if UnitClass("player") == "Warrior" then return 0.78, 0.61, 0.43,1
-		elseif UnitClass("player") == "Hunter" then return 0.67, 0.83, 0.45
-		elseif UnitClass("player") == "Mage" then return 0.41, 0.80, 0.94
-		elseif UnitClass("player") == "Rogue" then return 1.00, 0.96, 0.41
-		elseif UnitClass("player") == "Warlock" then return 0.58, 0.51, 0.79,1
-		elseif UnitClass("player") == "Druid" then return 1, 0.49, 0.04,1
-		elseif UnitClass("player") == "Shaman" then return 0.0, 0.44, 0.87
-		elseif UnitClass("player") == "Priest" then return 1.00, 1.00, 1.00
-		elseif UnitClass("player") == "Paladin" then return 0.96, 0.55, 0.73
-		end
-	end
-	if GetRaidRosterInfo(1) then
-		for i=1,GetNumRaidMembers() do
-			if UnitName("raid"..i) == name then
-				if UnitClass("raid"..i) == "Warrior" then return 0.78, 0.61, 0.43,1
-				elseif UnitClass("raid"..i) == "Hunter" then return 0.67, 0.83, 0.45
-				elseif UnitClass("raid"..i) == "Mage" then return 0.41, 0.80, 0.94
-				elseif UnitClass("raid"..i) == "Rogue" then return 1.00, 0.96, 0.41
-				elseif UnitClass("raid"..i) == "Warlock" then return 0.58, 0.51, 0.79,1
-				elseif UnitClass("raid"..i) == "Druid" then return 1, 0.49, 0.04,1
-				elseif UnitClass("raid"..i) == "Shaman" then return 0.0, 0.44, 0.87
-				elseif UnitClass("raid"..i) == "Priest" then return 1.00, 1.00, 1.00
-				elseif UnitClass("raid"..i) == "Paladin" then return 0.96, 0.55, 0.73
-				end
-			end
-		end
+	local class = RAT_NAME_TO_CLASS[name]
+	if class and RAT_CLASS_COLORS_RGBA[class] then
+		local c = RAT_CLASS_COLORS_RGBA[class]
+		return c[1], c[2], c[3], c[4]
 	end
 end
 
 function Rat_GetClassColors(name)
-	if name == UnitName("player") then
-		if UnitClass("player") == "Warrior" then return "|cffC79C6E"..name.."|r"
-		elseif UnitClass("player") == "Hunter" then return "|cffABD473"..name.."|r"
-		elseif UnitClass("player") == "Mage" then return "|cff69CCF0"..name.."|r"
-		elseif UnitClass("player") == "Rogue" then return "|cffFFF569"..name.."|r"
-		elseif UnitClass("player") == "Warlock" then return "|cff9482C9"..name.."|r"
-		elseif UnitClass("player") == "Druid" then return "|cffFF7D0A"..name.."|r"
-		elseif UnitClass("player") == "Shaman" then return "|cff0070DE"..name.."|r"
-		elseif UnitClass("player") == "Priest" then return "|cffFFFFFF"..name.."|r"
-		elseif UnitClass("player") == "Paladin" then return "|cffF58CBA"..name.."|r"
-		end
-	end
-	if GetRaidRosterInfo(1) then
-		for i=1,GetNumRaidMembers() do
-			if UnitName("raid"..i) == name then
-				if UnitClass("raid"..i) == "Warrior" then return "|cffC79C6E"..name.."|r"
-				elseif UnitClass("raid"..i) == "Hunter" then return "|cffABD473"..name.."|r"
-				elseif UnitClass("raid"..i) == "Mage" then return "|cff69CCF0"..name.."|r"
-				elseif UnitClass("raid"..i) == "Rogue" then return "|cffFFF569"..name.."|r"
-				elseif UnitClass("raid"..i) == "Warlock" then return "|cff9482C9"..name.."|r"
-				elseif UnitClass("raid"..i) == "Druid" then return "|cffFF7D0A"..name.."|r"
-				elseif UnitClass("raid"..i) == "Shaman" then return "|cff0070DE"..name.."|r"
-				elseif UnitClass("raid"..i) == "Priest" then return "|cffFFFFFF"..name.."|r"
-				elseif UnitClass("raid"..i) == "Paladin" then return "|cffF58CBA"..name.."|r"
-				end
-			end
-		end
-	else
-		for i=1,GetNumPartyMembers() do
-			if UnitName("party"..i) == name then
-				if UnitClass("party"..i) == "Warrior" then return "|cffC79C6E"..name.."|r"
-				elseif UnitClass("party"..i) == "Hunter" then return "|cffABD473"..name.."|r"
-				elseif UnitClass("party"..i) == "Mage" then return "|cff69CCF0"..name.."|r"
-				elseif UnitClass("party"..i) == "Rogue" then return "|cffFFF569"..name.."|r"
-				elseif UnitClass("party"..i) == "Warlock" then return "|cff9482C9"..name.."|r"
-				elseif UnitClass("party"..i) == "Druid" then return "|cffFF7D0A"..name.."|r"
-				elseif UnitClass("party"..i) == "Shaman" then return "|cff0070DE"..name.."|r"
-				elseif UnitClass("party"..i) == "Priest" then return "|cffFFFFFF"..name.."|r"
-				elseif UnitClass("party"..i) == "Paladin" then return "|cffF58CBA"..name.."|r"
-				end
-			end
-		end
+	local class = RAT_NAME_TO_CLASS[name]
+	if class and RAT_CLASS_COLORS_HEX[class] then
+		return RAT_CLASS_COLORS_HEX[class] .. name .. "|r"
 	end
 end
 
--- function to get class of a player
+-- function to get class of a player (cached O(1))
 
 function Rat:GetClass(name)
-	if name == UnitName("player") then
-		if UnitClass("player") == "Warrior" then return "Warrior"
-		elseif UnitClass("player") == "Hunter" then return "Hunter"
-		elseif UnitClass("player") == "Mage" then return "Mage"
-		elseif UnitClass("player") == "Rogue" then return "Rogue"
-		elseif UnitClass("player") == "Warlock" then return "Warlock"
-		elseif UnitClass("player") == "Druid" then return "Druid"
-		elseif UnitClass("player") == "Shaman" then return "Shaman"
-		elseif UnitClass("player") == "Priest" then return "Priest"
-		elseif UnitClass("player") == "Paladin" then return "Paladin"
-		end
-	end
-	if GetRaidRosterInfo(1) then
-		for i=1,GetNumRaidMembers() do
-			if UnitName("raid"..i) == name then
-				if UnitClass("raid"..i) == "Warrior" then return "Warrior"
-				elseif UnitClass("raid"..i) == "Hunter" then return "Hunter"
-				elseif UnitClass("raid"..i) == "Mage" then return "Mage"
-				elseif UnitClass("raid"..i) == "Rogue" then return "Rogue"
-				elseif UnitClass("raid"..i) == "Warlock" then return "Warlock"
-				elseif UnitClass("raid"..i) == "Druid" then return "Druid"
-				elseif UnitClass("raid"..i) == "Shaman" then return "Shaman"
-				elseif UnitClass("raid"..i) == "Priest" then return "Priest"
-				elseif UnitClass("raid"..i) == "Paladin" then return "Paladin"
-				end
-			end
-		end
-	end
+	return RAT_NAME_TO_CLASS[name]
 end
 
 -- function to get correct coords for classes in the
@@ -4408,288 +4352,311 @@ function Rat:ClassPos(class)
 	return 0.25, 0.5, 0.5, 0.75	-- Returns empty next one, so blank
 end
 
+-- Cached path strings (rebuilt when settings change)
+local Rat_cachedFontPath = nil
+local Rat_cachedFontSize = nil
+local Rat_cachedTitleFontSize = nil
+local Rat_cachedBarTexPath = nil
+local Rat_lastTimerTick = 0
+
+local function Rat_RebuildPathCache()
+	local fontName = Rat_Font[Rat_Settings["font"]]
+	local fontSize = Rat_FontSize[Rat_Settings["font"]]
+	Rat_cachedFontPath = "Interface\\AddOns\\Rat\\fonts\\" .. fontName .. ".TTF"
+	Rat_cachedFontSize = fontSize
+	Rat_cachedTitleFontSize = fontSize + 1
+	local barTex = Rat_BarTexture[Rat_Settings["bartexture"]]
+	Rat_cachedBarTexPath = "Interface\\AddOns\\Rat\\media\\bartextures\\" .. barTex .. ".tga"
+end
+
+-- Flat sorted list: reused table to avoid alloc each cycle
+local Rat_flatSorted = {}
+
+local function Rat_BuildFlatSorted()
+	-- Wipe reused table
+	local n = table.getn(Rat_flatSorted)
+	for idx = n, 1, -1 do Rat_flatSorted[idx] = nil end
+
+	local now = GetTime()
+	for playerName, abilities in pairs(RatTbl) do
+		for ability, data in pairs(abilities) do
+			if data["cd"] and data["duration"] and data["duration"] > now then
+				table.insert(Rat_flatSorted, {
+					name = playerName,
+					ability = ability,
+					duration = data["duration"],
+					cd = data["cd"],
+					spellId = data["spellId"],
+				})
+			end
+		end
+	end
+	-- Sort descending by duration (same as original sortDB)
+	table.sort(Rat_flatSorted, function(a, b) return a.duration > b.duration end)
+end
+
 -- update function
 
 function Rat:Update(force)
-	if uptimer == nil or (GetTime() - uptimer > 0.1) then
-		uptimer = GetTime()
-	if Rat_Settings["showhide"] == 1 then
-		Rat.Mainframe:Show()
-	else
-		Rat.Mainframe:Hide()
-	end
-	-- if UnitFactionGroup("player") == "Alliance" then
-	--	if not Rat.Mainframe.PaladinFrame:IsVisible() then
-	--		Rat.Mainframe.PaladinFrame:Show()
-	--	end
-	--	if not Rat.Options.Paladin:IsVisible() then
-	--		Rat.Options.Paladin:Show()
-	--	end
-	--	if Rat.Mainframe.ShamanFrame:IsVisible() then
-	--		Rat.Mainframe.ShamanFrame:Hide()
-	--	end
-	--	if Rat.Options.Shaman:IsVisible() then
-	--		Rat.Options.Shaman:Hide()
-	--	end
-	-- elseif UnitFactionGroup("player") == "Horde"  then
-	--	if not Rat.Mainframe.ShamanFrame:IsVisible() then
-	--		Rat.Mainframe.ShamanFrame:Show()
-	--	end
-	--	if not Rat.Options.Shaman:IsVisible() then
-	--		Rat.Options.Shaman:Show()
-	--	end
-	--	if Rat.Mainframe.PaladinFrame:IsVisible() then
-	--		Rat.Mainframe.PaladinFrame:Hide()
-	--	end
-	--	if Rat.Options.Paladin:IsVisible()  then
-	--		Rat.Options.Paladin:Hide()
-	--	end
-	-- end
-	if Rat_Settings["Minimap"] == nil then
-		Rat.Minimap:Hide()
-	elseif Rat_Settings["Minimap"] == 1 then
-		Rat.Minimap:Show()
-	end
-	if IsRaidOfficer("player") then
-		Rat.Options.version:Show()
-	elseif not IsRaidOfficer("player") then
-		Rat.Options.version:Hide()
-	end
-		local i = 1
-		if Rat_Debug then
-			local dbgCount = 0
-			for n,_ in pairs(RatTbl) do
-				for a,_ in pairs(RatTbl[n]) do
-					if RatTbl[n][a]["cd"] then
-						dbgCount = dbgCount + 1
-						DEFAULT_CHAT_FRAME:AddMessage("|cFFFF00FF[Rat Debug]|r RatTbl: " .. n .. "/" .. a .. " cd=" .. tostring(RatTbl[n][a]["cd"]) .. " dur=" .. tostring(RatTbl[n][a]["duration"]) .. " remaining=" .. tostring(RatTbl[n][a]["duration"] and (RatTbl[n][a]["duration"] - GetTime())) .. " showClass=" .. tostring(Rat_Settings[Rat:GetClass(n)]) .. " showAbility=" .. tostring(Rat_Settings[a]) .. " showhide=" .. tostring(Rat_Settings["showhide"]))
-					end
-				end
-			end
-			if dbgCount == 0 then DEFAULT_CHAT_FRAME:AddMessage("|cFFFF00FF[Rat Debug]|r RatTbl is EMPTY (no active CDs)") end
-		end
-		Rat_sorted = sortDB(name)
-		for _, skey in ipairs(Rat_sorted) do
-			for name,_ in pairs(RatTbl) do
-				for ability, _ in pairs(RatTbl[name]) do
-					if RatTbl[name][ability]["duration"] == skey and RatTbl[name][ability]["cd"] ~= nil then
-						-- fix: include the dot in the frame key
-						local tname = name.."."..ability
-						local texture = cdtbl[ability]
-						if not texture and HAS_NAMPOWER and RatTbl[name][ability]["spellId"] then
-							local iconId = GetSpellRecField(RatTbl[name][ability]["spellId"], "spellIconID")
-							if iconId then
-								texture = GetSpellIconTexture(iconId)
-								if texture then cdtbl[ability] = texture end
-							end
-						end
-						local bardecay = 1-((RatTbl[name][ability]["cd"]-(RatTbl[name][ability]["duration"]-GetTime())) / RatTbl[name][ability]["cd"])
-						local cdtime = rtime(RatTbl[name][ability]["duration"]-GetTime())
-						if bardecay > 1 then
-							bardecay = 1
-						end
-						if cdtime == nil then cdtime = 0 end
-						RatFrames[tname] = RatFrames[tname] or Rat:CreateFrame(tname)
-						local frame = RatFrames[tname]
-						Rat.Mainframe.Background.Top.Title:SetFont("Interface\\AddOns\\Rat\\fonts\\"..Rat_Font[Rat_Settings["font"]]..".TTF", Rat_FontSize[Rat_Settings["font"]]+1)
-						frame:SetWidth(Rat.Mainframe:GetWidth()-4)
-						frame:SetHeight(22)
+	local now = GetTime()
+	if uptimer == nil or (now - uptimer > 0.5) then
+		uptimer = now
 
-						-- fix: clear stale anchors before positioning to prevent stacking
-						frame:ClearAllPoints()
-
-						if Rat_Settings["Invert"] == nil then
-							frame:SetPoint("TOPLEFT",2,(-22*i)+2)
-						else
-							frame:SetPoint("TOPLEFT",2,(22*i))
-						end
-						frame.unit:SetTexture(Rat:GetClassColors(name))
-						frame.unit:SetGradientAlpha("Vertical", 1,1,1, 0, 1, 1, 1, 1)
-						frame.unitname:SetText(name)
-						frame.unitname:SetFont("Interface\\AddOns\\Rat\\fonts\\"..Rat_Font[Rat_Settings["font"]]..".TTF", Rat_FontSize[Rat_Settings["font"]])
-						frame.icon:SetTexture(texture)
-						frame.bar:SetWidth(bardecay*(Rat.Mainframe:GetWidth()-89))
-						frame.bar:SetTexture("Interface\\AddOns\\Rat\\media\\bartextures\\"..Rat_BarTexture[Rat_Settings["bartexture"]]..".tga",true)
-						frame.bar:SetVertexColor(Rat_Settings["abilitybarcolor"]["r"],Rat_Settings["abilitybarcolor"]["g"],Rat_Settings["abilitybarcolor"]["b"],1)
-						frame.timer:SetTextColor(Rat_Settings["abilitytextcolor"]["r"],Rat_Settings["abilitytextcolor"]["g"],Rat_Settings["abilitytextcolor"]["b"])
-						frame.time:SetTextColor(Rat_Settings["abilitytextcolor"]["r"],Rat_Settings["abilitytextcolor"]["g"],Rat_Settings["abilitytextcolor"]["b"])
-						if Rat_Settings["Notify"] == 1 and Rat_Settings[Rat:GetClass(name)] == 1 and Rat_Settings[ability] == 1 and math.floor(RatTbl[name][ability]["duration"]-GetTime()) == 0 then
-							if Rat_Settings[tname] == nil or (GetTime()-Rat_Settings[tname]) > 2 or (GetTime()-Rat_Settings[tname]) < 0 then
-								UIErrorsFrame:AddMessage(Rat_GetClassColors(name).." |cffFFFF00"..ability.." - READY!")
-								Rat_Settings[tname] = GetTime()
-							end
-						end
-						if cdtime ~= 0 then
-							frame.timer:SetText(ability)
-							frame.time:SetText(cdtime)
-							frame.timer:SetFont("Interface\\AddOns\\Rat\\fonts\\"..Rat_Font[Rat_Settings["font"]]..".TTF", Rat_FontSize[Rat_Settings["font"]])
-							frame.time:SetFont("Interface\\AddOns\\Rat\\fonts\\"..Rat_Font[Rat_Settings["font"]]..".TTF", Rat_FontSize[Rat_Settings["font"]])
-						end
-						if bardecay*(Rat.Mainframe:GetWidth()-89) > 0 then
-							frame.barglow:SetPoint("RIGHT", -(Rat.Mainframe:GetWidth()-88)+(bardecay*(Rat.Mainframe:GetWidth()-89)),0)
-							frame.barglow:Show()
-							if Rat_Settings[Rat:GetClass(name)] == 1 then
-								if Rat_Settings[ability] == 1 then
-									frame:Show()
-									i = i+1
-									--Rat.Mainframe:SetHeight(22+(22*i))
-									--Rat.Mainframe.Background.Tab1:SetHeight(Rat.Mainframe:GetHeight()-16)
-								else
-									--Rat.Mainframe:SetHeight(22+(22*i))
-									--Rat.Mainframe.Background.Tab1:SetHeight(Rat.Mainframe:GetHeight()-16)
-									frame:Hide()
-								end
-							else
-								--Rat.Mainframe:SetHeight(22+(22*i))
-								--Rat.Mainframe.Background.Tab1:SetHeight(Rat.Mainframe:GetHeight()-16)
-								frame:Hide()
-							end
-						else
-							frame.barglow:Hide()
-							frame:Hide()
-						end
-					end
-				end
-			end
-		end
-		if i == 0 then
-			Rat.Mainframe:SetHeight(22+(22*1))
-			Rat.Mainframe.Background.Tab1:SetHeight(Rat.Mainframe:GetHeight()-16)
-		end
-
-		-- Ready list update
-		if Rat_Settings["ReadyList"] ~= 1 then
-			if Rat.ReadyFrame:IsVisible() then Rat.ReadyFrame:Hide() end
+	-- Static UI checks only on force updates (roster change, settings, etc.)
+	if force then
+		if Rat_Settings["showhide"] == 1 then
+			Rat.Mainframe:Show()
 		else
-			Rat.ReadyFrame:Show()
-			-- Enumerate group members
-			local readyMembers = {}
-			if GetRaidRosterInfo(1) then
-				for ri = 1, GetNumRaidMembers() do
-					local rname = UnitName("raid" .. ri)
-					if rname then table.insert(readyMembers, rname) end
+			Rat.Mainframe:Hide()
+		end
+		if Rat_Settings["Minimap"] == nil then
+			Rat.Minimap:Hide()
+		elseif Rat_Settings["Minimap"] == 1 then
+			Rat.Minimap:Show()
+		end
+		if IsRaidOfficer("player") then
+			Rat.Options.version:Show()
+		else
+			Rat.Options.version:Hide()
+		end
+		-- Rebuild path cache on force
+		Rat_RebuildPathCache()
+		Rat_dirty = true
+	end
+
+	-- Only rebuild data when dirty
+	if Rat_dirty then
+		Rat_dirty = false
+		if not Rat_cachedFontPath then Rat_RebuildPathCache() end
+		Rat_BuildFlatSorted()
+	end
+
+	-- Timer text updates at ~1s intervals
+	local timerTick = math.floor(now)
+	local timerChanged = (timerTick ~= Rat_lastTimerTick)
+	if timerChanged then Rat_lastTimerTick = timerTick end
+
+	local i = 1
+	if Rat_Debug then
+		local dbgCount = 0
+		for n,_ in pairs(RatTbl) do
+			for a,_ in pairs(RatTbl[n]) do
+				if RatTbl[n][a]["cd"] then
+					dbgCount = dbgCount + 1
+					DEFAULT_CHAT_FRAME:AddMessage("|cFFFF00FF[Rat Debug]|r RatTbl: " .. n .. "/" .. a .. " cd=" .. tostring(RatTbl[n][a]["cd"]) .. " dur=" .. tostring(RatTbl[n][a]["duration"]) .. " remaining=" .. tostring(RatTbl[n][a]["duration"] and (RatTbl[n][a]["duration"] - now)) .. " showClass=" .. tostring(Rat_Settings[Rat:GetClass(n)]) .. " showAbility=" .. tostring(Rat_Settings[a]) .. " showhide=" .. tostring(Rat_Settings["showhide"]))
+				end
+			end
+		end
+		if dbgCount == 0 then DEFAULT_CHAT_FRAME:AddMessage("|cFFFF00FF[Rat Debug]|r RatTbl is EMPTY (no active CDs)") end
+	end
+
+	local mfWidth = Rat.Mainframe:GetWidth()
+	local barMaxWidth = mfWidth - 89
+
+	for _, entry in ipairs(Rat_flatSorted) do
+		local eName = entry.name
+		local ability = entry.ability
+		local data = RatTbl[eName] and RatTbl[eName][ability]
+		if data and data["duration"] and data["cd"] then
+			local tname = eName .. "." .. ability
+			local texture = cdtbl[ability]
+			if not texture and HAS_NAMPOWER and data["spellId"] then
+				local iconId = GetSpellRecField(data["spellId"], "spellIconID")
+				if iconId then
+					texture = GetSpellIconTexture(iconId)
+					if texture then cdtbl[ability] = texture end
+				end
+			end
+			local remaining = data["duration"] - now
+			local bardecay = remaining / data["cd"]
+			if bardecay > 1 then bardecay = 1 end
+			local barWidth = bardecay * barMaxWidth
+
+			RatFrames[tname] = RatFrames[tname] or Rat:CreateFrame(tname)
+			local frame = RatFrames[tname]
+
+			if force then
+				Rat.Mainframe.Background.Top.Title:SetFont(Rat_cachedFontPath, Rat_cachedTitleFontSize)
+			end
+			frame:SetWidth(mfWidth - 4)
+			frame:SetHeight(22)
+			frame:ClearAllPoints()
+
+			if Rat_Settings["Invert"] == nil then
+				frame:SetPoint("TOPLEFT", 2, (-22 * i) + 2)
+			else
+				frame:SetPoint("TOPLEFT", 2, (22 * i))
+			end
+			frame.unit:SetTexture(Rat:GetClassColors(eName))
+			frame.unit:SetGradientAlpha("Vertical", 1, 1, 1, 0, 1, 1, 1, 1)
+			frame.unitname:SetText(eName)
+			frame.unitname:SetFont(Rat_cachedFontPath, Rat_cachedFontSize)
+			frame.icon:SetTexture(texture)
+			frame.bar:SetWidth(barWidth)
+			frame.bar:SetTexture(Rat_cachedBarTexPath, true)
+			frame.bar:SetVertexColor(Rat_Settings["abilitybarcolor"]["r"], Rat_Settings["abilitybarcolor"]["g"], Rat_Settings["abilitybarcolor"]["b"], 1)
+			frame.timer:SetTextColor(Rat_Settings["abilitytextcolor"]["r"], Rat_Settings["abilitytextcolor"]["g"], Rat_Settings["abilitytextcolor"]["b"])
+			frame.time:SetTextColor(Rat_Settings["abilitytextcolor"]["r"], Rat_Settings["abilitytextcolor"]["g"], Rat_Settings["abilitytextcolor"]["b"])
+
+			-- Notify when ready
+			local playerClass = Rat:GetClass(eName)
+			if Rat_Settings["Notify"] == 1 and playerClass and Rat_Settings[playerClass] == 1 and Rat_Settings[ability] == 1 and math.floor(remaining) == 0 then
+				if Rat_Settings[tname] == nil or (now - Rat_Settings[tname]) > 2 or (now - Rat_Settings[tname]) < 0 then
+					UIErrorsFrame:AddMessage(Rat_GetClassColors(eName) .. " |cffFFFF00" .. ability .. " - READY!")
+					Rat_Settings[tname] = now
+				end
+			end
+
+			-- Timer text
+			if timerChanged or force then
+				local cdtime = rtime(remaining)
+				if cdtime and cdtime ~= 0 then
+					frame.timer:SetText(ability)
+					frame.time:SetText(cdtime)
+					frame.timer:SetFont(Rat_cachedFontPath, Rat_cachedFontSize)
+					frame.time:SetFont(Rat_cachedFontPath, Rat_cachedFontSize)
+				end
+			end
+
+			if barWidth > 0 then
+				frame.barglow:SetPoint("RIGHT", -(mfWidth - 88) + barWidth, 0)
+				frame.barglow:Show()
+				if playerClass and Rat_Settings[playerClass] == 1 then
+					if Rat_Settings[ability] == 1 then
+						frame:Show()
+						i = i + 1
+					else
+						frame:Hide()
+					end
+				else
+					frame:Hide()
 				end
 			else
-				for pi = 1, GetNumPartyMembers() do
-					local pname = UnitName("party" .. pi)
-					if pname then table.insert(readyMembers, pname) end
-				end
-				local pname = UnitName("player")
-				if pname then table.insert(readyMembers, pname) end
+				frame.barglow:Hide()
+				frame:Hide()
 			end
+		end
+	end
 
-			-- Track which ready row frames are used this pass
-			local usedRows = {}
-			local rowIndex = 0
+	if i == 0 then
+		Rat.Mainframe:SetHeight(22 + (22 * 1))
+		Rat.Mainframe.Background.Tab1:SetHeight(Rat.Mainframe:GetHeight() - 16)
+	end
 
-			for _, memberName in ipairs(readyMembers) do
-				local class = Rat:GetClass(memberName)
-				if class and Rat_Settings[class] == 1 then
-					local spells = RAT_CLASS_SPELLS[class]
-					if spells then
-						local readyIcons = {}
-						for _, spell in ipairs(spells) do
-							if Rat_Settings[spell] == 1 then
+	-- Ready list update
+	if Rat_Settings["ReadyList"] ~= 1 then
+		if Rat.ReadyFrame:IsVisible() then Rat.ReadyFrame:Hide() end
+	else
+		Rat.ReadyFrame:Show()
+		-- Use cached name list from RAT_NAME_TO_GUID
+		local readyMembers = {}
+		for memberName, _ in pairs(RAT_NAME_TO_GUID) do
+			table.insert(readyMembers, memberName)
+		end
+
+		local usedRows = {}
+		local rowIndex = 0
+
+		for _, memberName in ipairs(readyMembers) do
+			local class = Rat:GetClass(memberName)
+			if class and Rat_Settings[class] == 1 then
+				local spells = RAT_CLASS_SPELLS[class]
+				if spells then
+					local readyIcons = {}
+					for _, spell in ipairs(spells) do
+						if Rat_Settings[spell] == 1 then
+							local isOnCooldown = false
+							if RatTbl[memberName] and RatTbl[memberName][spell]
+							   and RatTbl[memberName][spell]["duration"]
+							   and RatTbl[memberName][spell]["duration"] - now > 0 then
+								isOnCooldown = true
+							end
+							if not isOnCooldown then
+								if RAT_NONBASELINE[spell] then
+									if Rat_SeenSpells[memberName] and Rat_SeenSpells[memberName][spell] then
+										table.insert(readyIcons, spell)
+									end
+								else
+									table.insert(readyIcons, spell)
+								end
+							end
+						end
+					end
+					-- Also check non-baseline spells not in class list
+					for nbSpell, _ in pairs(RAT_NONBASELINE) do
+						if Rat_SeenSpells[memberName] and Rat_SeenSpells[memberName][nbSpell] then
+							local alreadyListed = false
+							if spells then
+								for _, s in ipairs(spells) do
+									if s == nbSpell then alreadyListed = true end
+								end
+							end
+							if not alreadyListed and Rat_Settings[nbSpell] == 1 then
 								local isOnCooldown = false
-								if RatTbl[memberName] and RatTbl[memberName][spell]
-								   and RatTbl[memberName][spell]["duration"]
-								   and RatTbl[memberName][spell]["duration"] - GetTime() > 0 then
+								if RatTbl[memberName] and RatTbl[memberName][nbSpell]
+								   and RatTbl[memberName][nbSpell]["duration"]
+								   and RatTbl[memberName][nbSpell]["duration"] - now > 0 then
 									isOnCooldown = true
 								end
 								if not isOnCooldown then
-									-- For non-baseline spells, require evidence
-									if RAT_NONBASELINE[spell] then
-										if Rat_SeenSpells[memberName] and Rat_SeenSpells[memberName][spell] then
-											table.insert(readyIcons, spell)
-										end
-									else
-										table.insert(readyIcons, spell)
-									end
+									table.insert(readyIcons, nbSpell)
 								end
 							end
 						end
-						-- Also check non-baseline spells not in class list (e.g. Death Wish for Warrior)
-						for nbSpell, _ in pairs(RAT_NONBASELINE) do
-							if Rat_SeenSpells[memberName] and Rat_SeenSpells[memberName][nbSpell] then
-								-- Check it's not already in spells list
-								local alreadyListed = false
-								if spells then
-									for _, s in ipairs(spells) do
-										if s == nbSpell then alreadyListed = true end
-									end
-								end
-								if not alreadyListed and Rat_Settings[nbSpell] == 1 then
-									local isOnCooldown = false
-									if RatTbl[memberName] and RatTbl[memberName][nbSpell]
-									   and RatTbl[memberName][nbSpell]["duration"]
-									   and RatTbl[memberName][nbSpell]["duration"] - GetTime() > 0 then
-										isOnCooldown = true
-									end
-									if not isOnCooldown then
-										table.insert(readyIcons, nbSpell)
-									end
-								end
+					end
+
+					if table.getn(readyIcons) > 0 then
+						if not RatReadyFrames[memberName] then
+							RatReadyFrames[memberName] = Rat:CreateReadyRow(memberName)
+						end
+						local row = RatReadyFrames[memberName]
+						row:ClearAllPoints()
+						row:SetPoint("TOPLEFT", 2, (-22 * rowIndex))
+						row:SetWidth(Rat.ReadyFrame:GetWidth() - 4)
+
+						row.unitbg:SetTexture(Rat:GetClassColors(memberName))
+						row.unitbg:SetGradientAlpha("Vertical", 1, 1, 1, 0, 1, 1, 1, 1)
+						row.unitname:SetText(memberName)
+
+						for iconIdx, iconSpell in ipairs(readyIcons) do
+							if not row.icons[iconIdx] then
+								row.icons[iconIdx] = row:CreateTexture(nil, "OVERLAY")
+								row.icons[iconIdx]:SetWidth(20)
+								row.icons[iconIdx]:SetHeight(20)
 							end
+							local tex = row.icons[iconIdx]
+							tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+							tex:ClearAllPoints()
+							tex:SetPoint("TOPLEFT", 62 + (21 * (iconIdx - 1)), -1)
+							tex:SetTexture(cdtbl[iconSpell])
+							tex:Show()
+						end
+						for hideIdx = table.getn(readyIcons) + 1, table.getn(row.icons) do
+							if row.icons[hideIdx] then row.icons[hideIdx]:Hide() end
 						end
 
-						if table.getn(readyIcons) > 0 then
-							-- Create or reuse row frame
-							if not RatReadyFrames[memberName] then
-								RatReadyFrames[memberName] = Rat:CreateReadyRow(memberName)
-							end
-							local row = RatReadyFrames[memberName]
-							row:ClearAllPoints()
-							row:SetPoint("TOPLEFT", 2, (-22 * rowIndex))
-							row:SetWidth(Rat.ReadyFrame:GetWidth() - 4)
-
-							-- Set class color
-							row.unitbg:SetTexture(Rat:GetClassColors(memberName))
-							row.unitbg:SetGradientAlpha("Vertical", 1, 1, 1, 0, 1, 1, 1, 1)
-							row.unitname:SetText(memberName)
-
-							-- Set icons
-							for iconIdx, iconSpell in ipairs(readyIcons) do
-								if not row.icons[iconIdx] then
-									row.icons[iconIdx] = row:CreateTexture(nil, "OVERLAY")
-									row.icons[iconIdx]:SetWidth(20)
-									row.icons[iconIdx]:SetHeight(20)
-								end
-								local tex = row.icons[iconIdx]
-								tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-								tex:ClearAllPoints()
-								tex:SetPoint("TOPLEFT", 62 + (21 * (iconIdx - 1)), -1)
-								tex:SetTexture(cdtbl[iconSpell])
-								tex:Show()
-							end
-							-- Hide unused icons
-							for hideIdx = table.getn(readyIcons) + 1, table.getn(row.icons) do
-								if row.icons[hideIdx] then row.icons[hideIdx]:Hide() end
-							end
-
-							row:Show()
-							usedRows[memberName] = true
-							rowIndex = rowIndex + 1
-						end
+						row:Show()
+						usedRows[memberName] = true
+						rowIndex = rowIndex + 1
 					end
 				end
 			end
+		end
 
-			-- Hide rows for players not in current display
-			for rname, rframe in pairs(RatReadyFrames) do
-				if not usedRows[rname] then
-					rframe:Hide()
-				end
-			end
-
-			-- Resize ReadyFrame
-			if rowIndex > 0 then
-				Rat.ReadyFrame:SetHeight(21 + (22 * rowIndex))
-				Rat.ReadyFrame.Background.Content:SetHeight(22 * rowIndex)
-			else
-				Rat.ReadyFrame:SetHeight(21)
-				Rat.ReadyFrame.Background.Content:SetHeight(1)
+		for rname, rframe in pairs(RatReadyFrames) do
+			if not usedRows[rname] then
+				rframe:Hide()
 			end
 		end
+
+		if rowIndex > 0 then
+			Rat.ReadyFrame:SetHeight(21 + (22 * rowIndex))
+			Rat.ReadyFrame.Background.Content:SetHeight(22 * rowIndex)
+		else
+			Rat.ReadyFrame:SetHeight(21)
+			Rat.ReadyFrame.Background.Content:SetHeight(1)
+		end
+	end
 	end
 end
 
@@ -4836,21 +4803,6 @@ SLASH_RAT_SLASH2 = '/RAT'
 
 Rat:SetScript("OnEvent", Rat.OnEvent)
 Rat:SetScript("OnUpdate", Rat.Update)
-
--- sort function for our database
-
-function sortDB()
-	local sortedKeys = { }
-	for k, v in pairs(RatTbl) do
-		for l, _ in pairs(RatTbl[k]) do
-			if RatTbl[k][l]["duration"] ~= nil then
-				table.insert(sortedKeys, RatTbl[k][l]["duration"])
-			end
-		end
-	end
-	table.sort(sortedKeys, function(a,b) return a>b end)
-	return sortedKeys
-end
 
 function Rat:Print(msg)
 	DEFAULT_CHAT_FRAME:AddMessage("RAT: "..msg)
